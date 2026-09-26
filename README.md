@@ -13,13 +13,21 @@ no pre-baked animation: every pixel you see is a function of the integrated stat
 
 ### Run it right now
 
-Download **`cosmoscope-1.0.0.zip`** from the
-[releases page](https://github.com/ITZFACU-dev/Agentic-repository-test/releases), unzip it
-and run the bundled server — it is a prebuilt bundle with no dependencies:
+Grab the prebuilt bundle — 220 kB, no toolchain, no `npm install`:
+
+**➜ [`release/cosmoscope-1.0.0.zip`](https://github.com/ITZFACU-dev/Agentic-repository-test/blob/main/release/cosmoscope-1.0.0.zip)**
 
 ```
+unzip cosmoscope-1.0.0.zip
+cd cosmoscope-1.0.0
 node serve.mjs          # then open http://localhost:8080
 ```
+
+`serve.mjs` is a 70-line static server included in the zip (Node 18+); any static server
+works. Use HTTP rather than `file://` — browsers refuse to create module workers from the
+file system, so nothing would run. The archive is listed on the
+[releases page](https://github.com/ITZFACU-dev/Agentic-repository-test/releases) and can
+also be regenerated from a clean checkout with `npm ci && npm run build && npm run release`.
 
 From source:
 
