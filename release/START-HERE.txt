@@ -1,0 +1,68 @@
+Cosmoscope — a browser-based N-body astrophysics laboratory
+===========================================================
+
+QUICK START
+-----------
+1. Install Node.js 18 or newer (https://nodejs.org) if you do not have it.
+2. Open a terminal in this folder and run:
+
+       node serve.mjs
+
+3. Open http://localhost:8080 in Chrome, Edge, Firefox or Safari.
+
+That is all — no npm install, no build step, nothing is downloaded at runtime.
+`serve.mjs` is a small static file server included in this zip.
+
+Any static web server works just as well, for example:
+
+    npx serve .
+    python3 -m http.server 8080
+
+Note: opening index.html directly from the file system will NOT work. Browsers
+refuse to create ES-module workers from file:// URLs, so the physics worker never
+starts and you get a blank page. Serve it over HTTP.
+
+WHAT YOU ARE LOOKING AT
+-----------------------
+Cosmoscope integrates real Newtonian gravity — plus optional post-Newtonian
+relativity and Lense-Thirring frame dragging — in a Web Worker with a fixed
+timestep, and renders the result with an HDR WebGL2 pipeline: gravitational
+lensing, a relativistic accretion disk, Rayleigh/Mie atmospheres, procedural
+planet surfaces and an eye-adapting starfield.
+
+Pick a lab from the list on the left. Start with "Solar System", then try:
+
+  * Sun -> same-mass black hole      watch the inner planets vanish and the disk ignite
+  * Tidal disruption event           a star shredded inside R_t, half of it feeding the disk
+  * Three-body figure-eight          the Chenciner-Montgomery choreography
+  * Dark matter rotation curve       a flat NFW curve versus Kepler's law
+
+CONTROLS
+--------
+  Drag / right-drag / wheel      orbit / pan / zoom
+  Click a body                   telemetry, vectors, Kepler elements, camera follow
+  Space                          pause / resume
+  + / -                          time warp, 1 s = 1 s up to 1 s = 1 Myr
+  R                              restart the current lab
+  G / L / B / H                  curvature grid / labels / bloom / help
+
+On a phone: one finger orbits, two fingers pinch and pan, and the drawer button in
+the top right slides the panels away.
+
+IF IT RUNS SLOWLY
+-----------------
+Open the Visuals tab and set Quality to Auto (or Potato). Auto reads your GPU, picks
+a starting tier, then adjusts itself from the measured frame time. The HUD shows the
+active tier, milliseconds per step and the energy drift.
+
+EXPORTING RESULTS
+-----------------
+The inspector has CSV / JSON / Summary buttons. CSV is a time series (simulated time,
+kinetic and potential energy, energy drift, orbital elements, accretion luminosity)
+ready to plot in a spreadsheet; JSON is a full state dump of every body; Summary is a
+plain-text digest for a lab notebook.
+
+CREDIT
+------
+Built as an educational simulator. Physics and rendering details, validation numbers
+and known limits are documented in the repository README.
