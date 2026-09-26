@@ -3,12 +3,16 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Cosmoscope — an educational 3D gravity & astrophysics sandbox (Universe Sandbox inspired) built on Three.js / WebGL2 with a Web Worker physics core.",
+  "description": "Cosmoscope \u2014 an educational 3D gravity & astrophysics sandbox (Universe Sandbox inspired) built on Three.js / WebGL2 with a Web Worker physics core.",
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 5173",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 0.0.0.0 --port 4173",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "esbuild tests/physics.spec.ts --bundle --format=esm --platform=node --outfile=.tmp/physics.spec.mjs --log-level=error && node .tmp/physics.spec.mjs",
+    "test:shaders": "node tests/lint-glsl.mjs",
+    "test:integration": "node tests/build-integration.mjs && node .tmp/integration.mjs",
+    "test:all": "npm run typecheck && npm test && npm run test:shaders && npm run test:integration"
   },
   "dependencies": {
     "three": "^0.186.1"

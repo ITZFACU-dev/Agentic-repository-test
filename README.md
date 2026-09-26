@@ -15,7 +15,7 @@ no pre-baked animation: every pixel you see is a function of the integrated stat
 npm install
 npm run dev        # http://localhost:5173
 npm run build      # type-check + production bundle
-npm run typecheck
+npm run test:all   # 84 physics checks + shader lint + worker integration harness
 ```
 
 ---
@@ -157,11 +157,10 @@ measure of whether the integration can be trusted at the current warp.
 
 ## 5. Validation
 
-`tests/physics.spec.ts` — **84 checks, all passing**:
-
 ```
-npx esbuild tests/physics.spec.ts --bundle --format=esm --platform=node \
-  --outfile=.tmp/physics.spec.mjs && node .tmp/physics.spec.mjs
+npm test              # tests/physics.spec.ts — 84 checks, all passing
+npm run test:shaders  # tests/lint-glsl.mjs — every shader parses as GLSL ES 1.00
+npm run test:integration
 ```
 
 Measured results (excerpt):
@@ -184,12 +183,15 @@ Measured results (excerpt):
 
 Two more harnesses keep the rest honest:
 
-* `.tmp/integration.ts` (built via `.tmp/build-harness.mjs`) stubs the DOM and drives the
-  **real worker message loop** through the **real SceneManager and CameraRig** — 12
-  presets × 100 frames, plus every scenario, every what-if constant and all three
-  integrators with relativity, frame dragging, drag and an NFW halo enabled.
-* `.tmp/lintglsl.mjs` parses every shader with a GLSL ES 1.00 grammar (including the
-  `shared.glsl` inlining) so no shader reaches the GPU unparseable.
+* `tests/integration.spec.ts` (bundled by `tests/build-integration.mjs`) stubs the DOM
+  and drives the **real worker message loop** through the **real SceneManager and
+  CameraRig** — 12 presets × 100 frames, plus every scenario, every what-if constant and
+  all three integrators with relativity, frame dragging, drag and an NFW halo enabled.
+  It imports the renderer through the same `?raw` GLSL path the bundler uses, so what it
+  exercises is what the browser runs.
+* `tests/lint-glsl.mjs` parses every shader with a GLSL ES 1.00 grammar (resolving
+  `#include <shared>` exactly as the renderer does) so no shader reaches the GPU
+  unparseable.
 
 ---
 
