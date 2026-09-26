@@ -179,6 +179,19 @@ export function msStarLuminosity(mass: number): number {
 }
 
 /** Effective temperature implied by R and L (Stefan-Boltzmann). */
+/**
+ * Visual/optical thickness of an atmosphere: the altitude at which the
+ * optical depth falls to ~1/e². Used by the scattering shader and by the
+ * Roche-limit check so a gas giant's envelope is not treated as rock.
+ */
+export function atmosphereRadius(radius: number, at: AtmosphereSpec | null, densityScale = 1): number {
+  if (!at || !at.enabled || at.density <= 0) return radius;
+  const beta = (at.rayleigh[0] + at.rayleigh[1] + at.rayleigh[2]) / 3 + at.mie;
+  if (!(beta > 0)) return radius + 3 * at.scaleHeight;
+  const depth = (2 / beta) / Math.max(at.density * densityScale, 1e-6);
+  return radius + Math.min(Math.max(depth, at.scaleHeight), 12 * at.scaleHeight);
+}
+
 export function effectiveTemperature(luminosity: number, radius: number): number {
   return Math.pow(luminosity / (4 * Math.PI * radius * radius * SIGMA_SB), 0.25);
 }

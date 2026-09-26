@@ -23,10 +23,12 @@
 import { BarnesHut } from './BarnesHut';
 import { clamp } from '../core/mathx';
 import { AU, C, CHANDRASEKHAR_LIMIT, G, SIGMA_SB, SOLAR_MASS, TOV_LIMIT, schwarzschildRadius } from '../core/units';
-import type { BodyKind, BodySpec, Composition } from './CelestialBody';
+import type { AtmosphereSpec, BodyKind, BodySpec, Composition, RingSpec } from './CelestialBody';
 import {
   DEFAULT_COMPOSITION,
   compactRadius,
+  escapeVelocity,
+  hillRadius,
   radiusFromMass,
   rocheLimit,
 } from './CelestialBody';
@@ -64,6 +66,8 @@ export interface PhysicsParams {
   haloScaleRadius: number;
   /** Linear drag coefficient (1/s) — ISM ram pressure on debris. */
   drag: number;
+  /** Radiation-pressure scale: 1 = full Solar System sunlight (solar sail). */
+  radiationPressure: number;
 }
 
 export const DEFAULT_PARAMS: PhysicsParams = {
@@ -88,6 +92,7 @@ export const DEFAULT_PARAMS: PhysicsParams = {
   haloMass: 1.5e12,
   haloScaleRadius: 2e20,
   drag: 0,
+  radiationPressure: 0,
 };
 
 export type PhysicsEvent =
@@ -234,6 +239,22 @@ export class PhysicsEngine {
   notes: (string | undefined)[] = [];
   seeds: number[] = [];
   fluxCache: number[] = [];
+  atmospheres: (AtmosphereSpec | null)[] = [];
+  rings: (RingSpec | null)[] = [];
+
+  /** Instanced render side of ring systems produced by Roche disruption. */
+  ringParticles: Int32Array;
+  ringInner: Float64Array;
+  ringOuter: Float64Array;
+  ringMass: Float64Array;
+  /** Bodies destroyed by collision, tidal or Roche disruption since load. */
+  destroyedCount = 0;
+  /** Cumulative mass converted into rings and lost to accretion. */
+  ringMassTotal = 0;
+  /** Radiation-pressure acceleration field, refreshed by recomputeForces(). */
+  radAccel: Float64Array;
+  /** Luminosity as authored, before the what-if sunlight slider scales it. */
+  baseLuminosity: number[] = [];
 
   events: PhysicsEvent[] = [];
   diagnostics: EngineDiagnostics = {
@@ -283,6 +304,16 @@ export class PhysicsEngine {
     this.bound = new Uint8Array(capacity);
     this.tidalLocked = new Uint8Array(capacity);
     this.ids = new Int32Array(capacity);
+    this.ringParticles = new Int32Array(capacity);
+    this.ringInner = new Float64Array(capacity);
+    this.ringOuter = new Float64Array(capacity);
+    this.ringMass = new Float64Array(capacity);
+    this.radAccel = f3();
+  }
+
+  /** Gravitational constant actually in use (scaled by the what-if slider). */
+  get G(): number {
+    return this.Gs;
   }
 
   private get Gs(): number {
@@ -335,6 +366,13 @@ export class PhysicsEngine {
     const nid = new Int32Array(cap);
     nid.set(this.ids);
     this.ids = nid;
+    const nring = new Int32Array(cap);
+    nring.set(this.ringParticles);
+    this.ringParticles = nring;
+    this.ringInner = f1(this.ringInner);
+    this.ringOuter = f1(this.ringOuter);
+    this.ringMass = f1(this.ringMass);
+    this.radAccel = f3(this.radAccel);
     this.capacity = cap;
     this.scratch = null;
   }
@@ -350,6 +388,13 @@ export class PhysicsEngine {
     this.names = [];
     this.notes = [];
     this.seeds = [];
+    this.atmospheres = [];
+    this.rings = [];
+    this.destroyedCount = 0;
+    this.ringMassTotal = 0;
+    this.baseLuminosity = [];
+    this.ringParticles.fill(0);
+    this.ringMass.fill(0);
     for (const s of specs) this.add(s, true);
     this.recomputeForces();
     this.updateDiagnostics();
@@ -360,7 +405,9 @@ export class PhysicsEngine {
     this.grow();
     const i = this.count++;
     const p = this.params;
-    this.ids[i] = spec.id || i + 1;
+    // A body always gets a globally unique id: explicit ids are honoured only
+    // when they are free, otherwise the engine allocates one.
+    this.ids[i] = spec.id && this.indexOf(spec.id) < 0 ? spec.id : this.allocateId();
     this.names[i] = spec.name;
     this.kinds[i] = spec.kind;
     this.notes[i] = spec.note;
@@ -382,6 +429,7 @@ export class PhysicsEngine {
     this.albedo[i] = spec.albedo ?? 0.3;
     this.greenhouse[i] = spec.greenhouse ?? 0;
     this.luminosity[i] = spec.luminosity ?? 0;
+    this.baseLuminosity[i] = this.luminosity[i];
     this.internalHeat[i] = spec.internalHeat ?? 0;
     this.surfaceTemp[i] = spec.surfaceTemp ?? 250;
     this.tidalHeat[i] = 0;
@@ -399,6 +447,15 @@ export class PhysicsEngine {
     this.isTracer[i] = spec.mass <= 0 ? 1 : 0;
     if (this.isTracer[i]) this.mass[i] = 0;
     this.k2overQ[i] = k2OverQDefault(spec.kind, this.composition[i]);
+    this.atmospheres[i] = spec.atmosphere ?? null;
+    this.rings[i] = spec.rings ?? null;
+    if (spec.rings) {
+      this.ringParticles[i] = 6000;
+      this.ringInner[i] = spec.rings.innerRadius;
+      this.ringOuter[i] = spec.rings.outerRadius;
+    } else {
+      this.ringParticles[i] = 0;
+    }
     if (!quiet) this.events.push({ type: 'spawn', ids: [this.ids[i]] });
     void p;
     return i;
@@ -453,6 +510,12 @@ export class PhysicsEngine {
     this.names[i] = this.names[last];
     this.notes[i] = this.notes[last];
     this.seeds[i] = this.seeds[last];
+    this.atmospheres[i] = this.atmospheres[last];
+    this.rings[i] = this.rings[last];
+    this.ringParticles[i] = this.ringParticles[last];
+    this.ringInner[i] = this.ringInner[last];
+    this.ringOuter[i] = this.ringOuter[last];
+    this.ringMass[i] = this.ringMass[last];
   }
 
   removeById(id: number): boolean {
@@ -594,6 +657,7 @@ export class PhysicsEngine {
     else this.directForces();
     this.applyHalo();
     if (this.params.relativity || this.params.frameDragging) this.applyRelativisticCorrections();
+    if (this.params.radiationPressure > 0) this.applyRadiationPressure();
     if (this.params.drag > 0) this.applyDrag();
   }
 
@@ -647,6 +711,16 @@ export class PhysicsEngine {
     if (!isFinite(tauMin) || tauMin <= 0) return 1;
     const need = Math.ceil(Math.abs(dt) / (minTau * tauMin));
     return clamp(need, 1, this.params.maxSubsteps);
+  }
+
+  /**
+   * How many integrator calls of `dt` are needed for every body to stay
+   * resolved, given the per-call sub-step ceiling. The time-warp controller
+   * uses this to decide how much simulated time fits in one frame.
+   */
+  planSteps(dt: number): number {
+    const perCall = Math.max(this.params.maxSubsteps, 1);
+    return Math.max(1, Math.ceil(this.requiredSubsteps(dt) / perCall));
   }
 
   /** Advance the simulation by dt seconds. */
@@ -997,6 +1071,50 @@ export class PhysicsEngine {
     }
   }
 
+  /**
+   * Radiation pressure. A luminous body emits momentum at a rate L/c, so a
+   * body of cross-section A at distance r feels
+   *
+   *     F = L A / (4π r² c)          (perfectly absorbing sphere)
+   *
+   * and therefore a = F/m. The recoil is applied to the source as well, so the
+   * pair still conserves momentum — which is what lets the sandbox show that a
+   * solar sail only works because the *Sun* loses the momentum the sail gains.
+   */
+  private applyRadiationPressure(): void {
+    const p = this.params;
+    const c = C * p.cScale;
+    const k = p.radiationPressure;
+    if (k <= 0 || c <= 0) return;
+    const { pos, mass, radius } = this;
+    const n = this.count;
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < n; j++) {
+        if (i === j || this.luminosity[j] <= 0) continue;
+        const dx = pos[i * 3] - pos[j * 3];
+        const dy = pos[i * 3 + 1] - pos[j * 3 + 1];
+        const dz = pos[i * 3 + 2] - pos[j * 3 + 2];
+        const r2 = Math.max(dx * dx + dy * dy + dz * dz, 1);
+        const dist = Math.sqrt(r2);
+        const cross = Math.PI * radius[i] * radius[i];
+        const force = ((this.luminosity[j] * cross) / (4 * Math.PI * r2 * c)) * k;
+        const mi = mass[i];
+        const mj = mass[j];
+        if (mi <= 0 || mi + mj <= 0) continue;
+        const a = force / mi;
+        const ux = dx / dist, uy = dy / dist, uz = dz / dist;
+        this.acc[i * 3] += a * ux;
+        this.acc[i * 3 + 1] += a * uy;
+        this.acc[i * 3 + 2] += a * uz;
+        // Recoil on the emitter, mass-weighted so Σ m a = 0.
+        const w = mi / (mi + mj);
+        this.acc[j * 3] -= a * w * ux;
+        this.acc[j * 3 + 1] -= a * w * uy;
+        this.acc[j * 3 + 2] -= a * w * uz;
+      }
+    }
+  }
+
   private applyDrag(): void {
     const k = this.params.drag;
     for (let i = 0; i < this.count; i++) {
@@ -1183,6 +1301,7 @@ export class PhysicsEngine {
             streamMass: this.mass[i],
           });
           this.removeAt(i);
+          this.destroyedCount++;
           this.recomputeForces();
           return;
         }
@@ -1326,6 +1445,7 @@ export class PhysicsEngine {
     this.internalHeat[heavy] += this.internalHeat[light] * 0.5;
 
     this.removeAt(light);
+    this.destroyedCount++;
 
     // Power-law fragment swarm, produced after the removal so indices are safe.
     let fragments = 0;
@@ -1430,8 +1550,25 @@ export class PhysicsEngine {
       const rigid = this.params.rocheRigid && (this.kinds[i] === 'asteroid' || this.kinds[i] === 'comet');
       const dRoche = rocheLimit(this.mass[best], this.radius[best], density, rigid);
       if (bestDist < dRoche) {
-        // Tidal radius also matters for very soft bodies — the smaller of the
-        // two governs disruption.
+        const satelliteMass = this.mass[i];
+        const pMass = this.mass[best];
+        const total = pMass + satelliteMass;
+        // The shredded debris is spread into a ring but its mass and momentum
+        // accrete onto the primary — the ring is the *visual* expression of an
+        // inelastic capture, so the books still balance exactly.
+        for (let k = 0; k < 3; k++) {
+          this.vel[best * 3 + k] = (pMass * this.vel[best * 3 + k] + satelliteMass * this.vel[i * 3 + k]) / total;
+        }
+        this.mass[best] = total;
+        this.ringParticles[best] = Math.min(this.ringParticles[best] + 2600, 12000);
+        this.ringInner[best] = Math.max(bestDist * 0.66, this.radius[best] * 1.05);
+        this.ringOuter[best] = bestDist * 1.75;
+        this.ringMass[best] += satelliteMass;
+        this.ringMassTotal += satelliteMass;
+        this.destroyedCount++;
+        // Shock heating of the ring: the kinetic energy of the disruption is
+        // partly thermalised, so the debris glows.
+        this.surfaceTemp[best] = Math.max(this.surfaceTemp[best], clamp(this.surfaceTemp[i], 250, 3000));
         this.events.push({
           type: 'roche-disruption',
           primaryId: this.ids[best],
@@ -1439,7 +1576,7 @@ export class PhysicsEngine {
           bodyName: this.names[i],
           radius: bestDist,
           rocheRadius: dRoche,
-          ringMass: this.mass[i],
+          ringMass: satelliteMass,
           tilt: Math.acos(clamp(this.spinAxis[best * 3 + 2], -1, 1)),
         });
         this.removeAt(i);
@@ -1463,6 +1600,40 @@ export class PhysicsEngine {
       this.collapseStar(this.ids[i]);
       return;
     }
+  }
+
+  /**
+   * What-if: replace a star with a black hole of identical mass.
+   *
+   * This is the single best demonstration in the whole simulator that orbits
+   * depend on mass, not on what the mass is made of: every planet keeps its
+   * orbit to machine precision, but the sky goes black and the lensing pass
+   * switches on because r_s/R is suddenly of order 1.
+   */
+  convertToBlackHole(id: number, spin = 0.7): boolean {
+    const i = this.indexOf(id);
+    if (i < 0) return false;
+    const m = this.mass[i];
+    this.kinds[i] = 'blackhole';
+    this.radius[i] = schwarzschildRadius(m);
+    this.bhSpin[i] = clamp(spin, 0, 0.998);
+    this.luminosity[i] = 0;
+    this.baseLuminosity[i] = 0;
+    this.internalHeat[i] = 0;
+    this.surfaceTemp[i] = 0;
+    this.albedo[i] = 0;
+    this.spinRate[i] = 0;
+    this.spinAxis[i * 3] = 0;
+    this.spinAxis[i * 3 + 1] = 1;
+    this.spinAxis[i * 3 + 2] = 0;
+    this.atmospheres[i] = null;
+    this.rings[i] = null;
+    this.ringParticles[i] = 0;
+    this.notes[i] = 'An event horizon of the same mass as the star it replaced: same orbits, no light.';
+    this.events.push({ type: 'message', text: `${this.names[i]} collapsed into a black hole (${(m / SOLAR_MASS).toFixed(2)} M☉, r_s = ${(this.radius[i] / 1000).toFixed(1)} km) with the same orbital dynamics.` });
+    this.recomputeForces();
+    this.updateDiagnostics();
+    return true;
   }
 
   /** Force a core-collapse (supernova) with an explicit UI trigger. */
@@ -1601,6 +1772,80 @@ export class PhysicsEngine {
   }
 
   // ── Output ────────────────────────────────────────────────────────────────
+
+  // ── Public inspection API (worker telemetry + UI) ─────────────────────────
+
+  /** Index of a body given its stable id, or -1. */
+  indexOfId(id: number): number {
+    return this.indexOf(id);
+  }
+
+  /** The dominant attractor of body `i`, exposed for telemetry. */
+  primaryOfIndex(i: number): { index: number; distance: number } {
+    return this.primaryFor(i);
+  }
+
+  /** Hill (Roche lobe) radius of body `i` around its primary, metres. */
+  hillRadiusOf(i: number): number {
+    const prim = this.primaryFor(i);
+    if (prim.index < 0 || prim.index === i || prim.distance <= 0) return 0;
+    return hillRadius(prim.distance, this.mass[i], this.mass[prim.index]);
+  }
+
+  /** Fluid (or rigid) Roche limit for body `i`, metres. */
+  rocheOf(i: number, rigid = false): number {
+    const prim = this.primaryFor(i);
+    if (prim.index < 0 || prim.index === i) return 0;
+    const vol = (4 / 3) * Math.PI * this.radius[i] ** 3;
+    if (vol <= 0) return 0;
+    return rocheLimit(this.mass[prim.index], this.radius[prim.index], this.mass[i] / vol, rigid);
+  }
+
+  /**
+   * Radiative equilibrium temperature of body `i` from its cached incident
+   * flux:
+   *     T_eq = [ (1−A) F (1+G) / (4σ) ]^{1/4}
+   * (the 4σ rather than 16πσR² form: F·πR² absorbed over 4πR² emitting area).
+   */
+  equilibriumOf(i: number): number {
+    const f = this.fluxCache[i] ?? 0;
+    if (!(f > 0)) return this.surfaceTemp[i];
+    const q = f * (1 - this.albedo[i]) * (1 + this.greenhouse[i]) + this.internalHeat[i] + this.tidalHeat[i];
+    return Math.pow(Math.max(q, 1e-9) / (4 * SIGMA_SB), 0.25);
+  }
+
+  /** Schwarzschild radius of body `i` (meaningful for compact objects). */
+  schwarzschildOf(i: number): number {
+    return schwarzschildRadius(Math.max(this.mass[i], 0));
+  }
+
+  escapeSpeedOf(i: number): number {
+    return escapeVelocity(this.mass[i], this.radius[i]);
+  }
+
+  /** Radiation-pressure strength: 1 = Solar-System sunlight at 1 AU. */
+  setRadiationPressure(value: number): void {
+    this.params.radiationPressure = Math.max(0, value);
+    this.recomputeForces();
+  }
+
+  /** Scale every photospheric luminosity by `factor` (what-if sunlight knob). */
+  scaleLuminosity(factor: number): void {
+    const f = Math.max(0, factor);
+    for (let i = 0; i < this.count; i++) {
+      if (this.baseLuminosity[i] === undefined) this.baseLuminosity[i] = this.luminosity[i];
+      this.luminosity[i] = this.baseLuminosity[i] * f;
+      if (this.kinds[i] === 'star') {
+        // A brighter star is a bigger star: L ∝ R²T⁴, so keep the spectrum
+        // plausible by lifting the photospheric temperature too.
+        this.surfaceTemp[i] = Math.pow(
+          Math.max(this.luminosity[i], 1e-9) / (4 * Math.PI * this.radius[i] ** 2 * SIGMA_SB),
+          0.25,
+        );
+      }
+    }
+    this.updateDiagnostics();
+  }
 
   /** The dominant attractor for a body: which primary governs its orbit. */
   private primaryFor(i: number): { index: number; distance: number } {

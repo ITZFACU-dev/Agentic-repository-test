@@ -14,7 +14,9 @@
     "three": "^0.186.1"
   },
   "devDependencies": {
+    "@shaderfrog/glsl-parser": "^7.0.1",
     "@types/three": "^0.186.0",
+    "esbuild": "^0.28.2",
     "typescript": "^7.0.2",
     "vite": "^8.3.1"
   }
