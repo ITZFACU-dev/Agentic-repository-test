@@ -29,6 +29,8 @@ export interface SceneOptions {
   showVectors: boolean;
   exaggeration: number;
   atmosphereQuality: 'low' | 'medium' | 'high';
+  /** Accretion disks around compact objects (off unless a lab asks for one). */
+  showAccretion: boolean;
 }
 
 export class SceneManager {
@@ -58,6 +60,7 @@ export class SceneManager {
     showVectors: true,
     exaggeration: 1,
     atmosphereQuality: 'high',
+    showAccretion: false,
   };
 
   constructor(pipeline: HDRPipeline, labelsHost: HTMLElement) {
@@ -144,14 +147,18 @@ export class SceneManager {
       const kind = this.kindOf(snapshot.ids[i]);
       const compact = (flags & BodyFlags.BlackHole) !== 0 || kind === 'whitedwarf';
       if (!compact) continue;
-      const radius = snapshot.radii[i];
-      if (radius <= 0) continue;
-      const rs = radius; // compact bodies are drawn at their Schwarzschild radius
-      const hasDisk = kind === 'blackhole';
+      const entry = this.roster.get(snapshot.ids[i]);
+      const mass = entry?.mass ?? 0;
+      if (mass <= 0) continue;
+      // The deflection angle depends on the *mass*, not on how big the object is
+      // drawn: r_s = 2GM/c². A white dwarf's horizon is 9 km across, and its
+      // shadow should be 23 km across, not the 13 000 km of the star itself.
+      const rs = 1.4852e-27 * mass;
+      const hasDisk = kind === 'blackhole' && this.options.showAccretion;
       this.lensCache.push({
         position: new THREE.Vector3(snapshot.pos[i * 3], snapshot.pos[i * 3 + 1], snapshot.pos[i * 3 + 2]),
-        rs: rs * (kind === 'neutronstar' ? 0.35 : 1),
-        strength: kind === 'neutronstar' ? 0.25 : 1,
+        rs,
+        strength: 1,
         axis: new THREE.Vector3(0, 1, 0),
         diskStrength: hasDisk ? 1 : 0,
         diskOuter: rs * 14,
@@ -248,7 +255,10 @@ export class SceneManager {
   updateFrame(rig: CameraRig, pipeline: HDRPipeline, width: number, height: number): void {
     const vp = rig.viewProjection;
     const camPos = rig.cameraPosition;
-    this.starfield.setViewProjection(rig.camera.projectionMatrix);
+    // The sky must rotate with the camera: it is drawn from the *rotation-only*
+    // view-projection (the same one the bodies use, with the translation
+    // removed), so the sphere behaves like an infinitely distant skybox.
+    this.starfield.setViewProjection(vp);
     // The sky sphere is centred on the camera by construction: the vertex
     // shader uses the rotation-only view matrix, so it behaves like a skybox
     // at infinity and never clips.

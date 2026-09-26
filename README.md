@@ -1,1 +1,205 @@
-# Agentic-repository-test
+# Cosmoscope
+
+**A real-time, browser-based N-body astrophysics laboratory for STEM teaching.**
+
+Cosmoscope simulates gravity the way a textbook describes it — pairwise Newtonian
+attraction plus post-Newtonian corrections, tidal dissipation, radiative balance and
+Roche-limit breakup — and then renders the result with an HDR pipeline that includes
+gravitational lensing, relativistic accretion disks, procedural planet surfaces and
+Rayleigh/Mie atmospheres.
+
+Everything runs in the browser on WebGL2. There is no server, no dataset to download and
+no pre-baked animation: every pixel you see is a function of the integrated state.
+
+```
+npm install
+npm run dev        # http://localhost:5173
+npm run build      # type-check + production bundle
+npm run typecheck
+```
+
+---
+
+## 1. What it does
+
+| Capability | Where |
+| --- | --- |
+| RK4 / velocity-Verlet / 4th-order Hermite integrators, switchable live | `src/physics/PhysicsEngine.ts` |
+| Adaptive sub-stepping driven by the local gravitational gradient ∇g | `PhysicsEngine.requiredSubsteps()` |
+| Dynamic Plummer softening ε, tree-or-direct force evaluation | `softening2For()`, `src/physics/BarnesHut.ts` |
+| 1PN relativity (perihelion precession) + Lense-Thirring frame dragging | `applyRelativisticCorrections()` |
+| Fluid (2.44 R) and rigid (1.26 R) Roche limits → instanced debris rings | `checkRoche()`, `BodyRenderer.updateParticles()` |
+| Inelastic/elastic collisions with Q = ½μΔv² shock heating and power-law fragments | `resolveCollisions()`, `mergeBodies()` |
+| Lava lakes that cool by Stefan-Boltzmann radiation | `updateThermodynamics()` |
+| T_eq with albedo + greenhouse, habitable-zone ribbons | `updateThermodynamics()`, `src/shaders/hz.*.glsl` |
+| Tidal heating of eccentric orbits (Io–Jupiter) and tidal locking | `updateTides()` |
+| Chandrasekhar (1.44 M☉) / TOV (2.17 M☉) collapse → WD, NS, Kerr BH | `collapseStar()`, `compactRadius()` |
+| Procedural surfaces, single + multiple atmospheric scattering | `src/shaders/body.*.glsl`, `atmosphere.*.glsl` |
+| HDR octahedral starfield with eye adaptation | `src/shaders/starfield.frag.glsl`, `luminance.frag.glsl` |
+| Gravitational lensing + relativistic accretion disk | `src/shaders/lensing.frag.glsl` |
+| Spacetime-curvature grid (Flamm paraboloid, per-vertex GPU) | `src/shaders/grid.*.glsl` |
+| Live L1–L5 Lagrange markers, trails, vector overlays | `src/render/OverlayRenderer.ts` |
+| Energy-conservation graph, Keplerian telemetry, logarithmic time warp | `src/ui/EnergyGraph.ts`, `Inspector.ts`, `Panels.ts` |
+| What-if constants (G, c, radiation pressure, luminosity) and one-click scenarios | `src/workers/physics.worker.ts` |
+
+### Learning modules
+
+| Module | Preset(s) | Physics on display |
+| --- | --- | --- |
+| 1. Solar System | `solar-system` | Barycentric wobble (the Sun's 12-year dance around the Jupiter–Sun barycentre), 261 bodies including the Kuiper belt and comets |
+| 2. Three-body chaos | `three-body-figure8`, `three-body-pythagorean`, `chaos-lyapunov` | Chenciner–Montgomery figure-eight, Broucke–Hadjidemetriou Pythagorean orbit, exponential Lyapunov divergence from a 1-metre perturbation |
+| 3. Orbital Mechanics 101 | `orbital-hohmann`, `orbital-assist` | Hohmann transfer Δv = 2.3995 + 1.4572 km/s (LEO 6 778 km → GEO), gravity-assist speed change, escape velocity |
+| 4. Tidal disruption events | `tde` | A star on a parabolic orbit is spaghettified inside R_t = R★(M_BH/m★)^{1/3}; the debris streams on ballistic orbits |
+| 5. Dark-matter lab | `galaxy-curve` | Flat rotation curves from an NFW halo (v(10 kpc)/v(20 kpc) = 1.08) versus the Keplerian 0.71 decline |
+
+Extra labs: `roche-ring`, `tidal-heating`, `sun-black-hole`, `impact`, `binary`,
+`stellar-collapse`, `sandbox`.
+
+---
+
+## 2. Architecture
+
+```
+index.html ─ src/main.ts ─ src/ui/App.ts
+                                │  commands            snapshots (transferable)
+                                ▼                             ▲
+                        src/workers/physics.worker.ts ────────┘
+                                │
+                        src/physics/PhysicsEngine.ts   (SoA Float64 state)
+                                ├── CelestialBody.ts   (masses, radii, composition)
+                                ├── BarnesHut.ts       (O(N log N) octree)
+                                └── OrbitalElements.ts (state vector ⇄ Kepler)
+
+   src/render/  HDRPipeline · CameraRig · BodyRenderer · Starfield · CurvatureGrid
+                OverlayRenderer · Labels · SceneManager
+   src/shaders/ body · atmosphere · starfield · grid · lensing · bright · blur
+                luminance · tonemap · hz  (+ shared.glsl noise/colour library)
+   src/sim/     presets.ts · protocol.ts
+```
+
+**The physics never blocks the renderer.** The engine lives in a dedicated Web Worker and
+integrates a fixed time step; the main thread asks for "advance by *dt* seconds", draws
+whatever snapshot it already has, and swaps in the next one when it arrives. Snapshots
+travel through a three-deep buffer pool with transferable `ArrayBuffer`s, so the steady
+state allocates nothing. A slow frame changes the resolution of the simulation (the
+sub-step budget is bounded and reported) but can never destabilise an orbit.
+
+**Rendering is camera-relative.** Positions are metres throughout — a 6 371 km planet and
+a 10¹³ m orbit in one scene — so the vertex shaders subtract the camera position and use a
+rotation-only view matrix, with adaptive near/far planes that track the size of whatever
+is selected. Float32 precision stays usable from a planetary surface to the Kuiper belt.
+
+### Physics decisions worth knowing
+
+* **Softening is numerical only.** `ε²` never includes body radii; contact is the
+  collision resolver's job. Including radii biased Io's force by ~4 % and broke the
+  Keplerian-orbit validation, which is exactly the kind of physics you cannot fudge.
+* **Sub-stepping uses τ = max(|v|/|a|, √(r/|a|)).** For a circular orbit both terms equal
+  the orbital period over 2π; for a body released from rest the second is the free-fall
+  time. Near periapsis τ collapses, so the step refines automatically — the substep count
+  on the HUD is this number, not a heuristic.
+* **Relativity is applied pairwise with a mass-ratio reaction.** The relative 1PN
+  acceleration is distributed as m_j/M and −m_i/M, so Σmᵢaᵢ = 0 exactly. (Applying the
+  full term to both bodies — the naive pairwise sum — accelerates a 10⁷ M☉ black hole to
+  hundreds of c. That bug is why the TDE preset used to gain 10¹⁶ J.)
+* **Fixed bodies are masked at every Runge-Kutta stage,** not just the first, or a
+  "frozen" body creeps away at the order of the step size.
+* **The thermodynamic cache stores incident flux,** never absorbed flux, or each step
+  attenuates the sunlight by another factor of (1−A) and a lava world freezes at 57 K.
+
+---
+
+## 3. Rendering pipeline
+
+```
+scene ──▶ RGBA16F + depth texture                     (instanced procedural bodies)
+          ├──▶ bright pass ─▶ 4 blurred mips ─▶ bloom (additive, half res)
+          ├──▶ 1/16 luminance ─▶ temporal adaptation   (eye: fast up, slow down)
+          └──▶ lensing + accretion disk (ray-marched, reads depth for occlusion)
+                                    │
+                                    └──▶ ACES tonemap ──▶ sRGB
+```
+
+* **Lensing** uses the Schwarzschild deflection series α(b) = 4GM/c²b + (15π/4)(GM/c²)²/b²
+  and captures rays inside the photon-sphere critical impact parameter b_c = 3√3 GM/c²,
+  which paints the shadow and forms the Einstein ring from the scene buffer itself.
+* **The accretion disk** is integrated in the same pass: a Shakura–Sunyaev temperature
+  profile T ∝ r^(−3/4), Doppler beaming δ³ with the correct Keplerian β, and the
+  gravitational redshift factor √(1 − r_s/r).
+* **Atmospheres** march 12 view × 6 light samples through an exponential density profile
+  with real per-channel Rayleigh coefficients (β_r(550 nm) = 5.8×10⁻⁶ m⁻¹, Bucholtz 1995),
+  a Henyey–Greenstein Mie phase function, and an isotropic multiple-scattering term so
+  terminators and sunsets are not black.
+* **Surfaces** are generated per fragment from a stable per-body seed: domain-warped fBm
+  continents, ridged mountains, latitude ice, gas-giant bands with a Great Spot vortex,
+  lava cracks radiating as blackbody(1100–1800 K), and granulation with Eddington limb
+  darkening (2+3μ)/5 for stars.
+
+---
+
+## 4. Controls
+
+| Input | Action |
+| --- | --- |
+| Drag / right-drag / wheel | orbit / pan / zoom |
+| Click a body | select it: telemetry, vectors, Kepler ellipse, camera follow |
+| `Space` | pause / resume |
+| `+` / `−` | time warp (ladder from 1 s = 1 s to 1 s = 1 Myr) |
+| `⇄` | run time backwards (gravity is time-reversible) |
+| `R` | restart the current lab |
+| `G` `L` `B` `H` | curvature grid · labels · bloom · help |
+
+The HUD reports simulated time, warp, body count, integrator, sub-steps per step,
+wall-clock cost per step and the relative energy drift — the last one being the honest
+measure of whether the integration can be trusted at the current warp.
+
+---
+
+## 5. Validation
+
+`tests/physics.spec.ts` — **84 checks, all passing**:
+
+```
+npx esbuild tests/physics.spec.ts --bundle --format=esm --platform=node \
+  --outfile=.tmp/physics.spec.mjs && node .tmp/physics.spec.mjs
+```
+
+Measured results (excerpt):
+
+| Check | Result |
+| --- | --- |
+| Kepler's third law, Earth after one year | 1.000 000 AU, relative error 1.1×10⁻¹⁴ |
+| Integrator convergence orders | RK4 4.33, Hermite 3.98, Verlet 2.00 |
+| Verlet bounded-energy envelope vs RK4 drift | ×1.00 vs ×1.62 growth over 20 000 steps |
+| Mercury 1PN perihelion precession | 42.98″/century (analytic 43.0″) |
+| Barnes-Hut error at θ = 0.2 / 0.5 / 1.0 | 0.026 % / 0.653 % / 5.87 % |
+| Adaptive sub-stepping through a close encounter | ΔE/E = 2.9×10⁻¹⁰, 128 sub-steps at periapsis |
+| Lagrange points L1–L5 (Sun–Jupiter) | 4.853 287 / 5.562 851 / −5.197 107 AU, equilateral L4/L5 |
+| Saturn fluid Roche limit (ice) | 157 968 km |
+| Radiative equilibrium: Earth / Venus / Mars | 254.0 K / 727.4 K / 210.1 K |
+| Remnant map 0.5 → 1.4 → 1.45 → 2.17 → 25 M☉ | WD, WD, NS, BH, BH |
+| NFW halo rotation curve | v(10 kpc) = 250.3, v(20 kpc) = 269.7 km/s |
+| Solar-system preset (261 bodies) energy drift | 9.9×10⁻¹¹ |
+| Determinism | bit-identical after two identical runs |
+
+Two more harnesses keep the rest honest:
+
+* `.tmp/integration.ts` (built via `.tmp/build-harness.mjs`) stubs the DOM and drives the
+  **real worker message loop** through the **real SceneManager and CameraRig** — 12
+  presets × 100 frames, plus every scenario, every what-if constant and all three
+  integrators with relativity, frame dragging, drag and an NFW halo enabled.
+* `.tmp/lintglsl.mjs` parses every shader with a GLSL ES 1.00 grammar (including the
+  `shared.glsl` inlining) so no shader reaches the GPU unparseable.
+
+---
+
+## 6. Deliberate limits
+
+* The accretion disk is emissive-only; it does not feed back on the dynamics.
+* Debris rings are integrated as an analytic Keplerian field with optional drag, and the
+  shredded mass accretes onto the primary — an honest accounting of momentum without
+  paying for 26 000 extra N-body particles on the CPU.
+* Large warps coarsen the integration. The engine says so in the HUD instead of quietly
+  producing beautiful nonsense.
+* Galaxies use softened, halo-dominated dynamics; they are for rotation-curve teaching,
+  not for cosmological structure formation.

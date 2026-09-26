@@ -153,6 +153,9 @@ export class App {
         this.scene.overlays.showForce = Boolean(value);
         this.scene.overlays.showAccel = Boolean(value);
         break;
+      case 'accretion':
+        this.scene.options.showAccretion = Boolean(value);
+        break;
       case 'lagrange': {
         this.scene.overlays.showLagrange = Boolean(value);
         const ranked = [...this.scene.rosterEntries.values()].sort((a, b) => b.mass - a.mass);
@@ -231,10 +234,29 @@ export class App {
         this.timebar.setWarp(this.warp);
         this.left.showLesson(message.name, message.lesson, message.watchFor);
         this.pendingCamera = message.camera;
+        // Presets declare which teaching overlays matter for their lesson.
         for (const overlay of message.overlays) {
-          if (overlay === 'grid') this.actions.overlay('grid', true);
-          if (overlay === 'habitability') this.actions.overlay('habitability', true);
-          if (overlay === 'vectors') this.actions.overlay('vectors', true);
+          switch (overlay) {
+            case 'potential':
+              this.actions.overlay('grid', true);
+              break;
+            case 'habitable':
+              this.actions.overlay('habitability', true);
+              break;
+            case 'vectors':
+              this.actions.overlay('vectors', true);
+              break;
+            case 'trails':
+            case 'roche':
+            case 'lyapunov':
+            case 'kepler':
+              this.actions.overlay('trails', true);
+              break;
+            case 'lens':
+              this.setPipeline('lensing', true);
+              this.actions.overlay('accretion', true);
+              break;
+          }
         }
         break;
       }
@@ -287,7 +309,9 @@ export class App {
   }[] = [];
 
   private applySnapshot(snapshot: Snapshot): void {
-    const dt = snapshot.simTime - this.lastSnapshotAt;
+    // Wall-clock delta since the previous snapshot, clamped: at a 1 Myr/s warp
+    // the raw value would be 10¹⁰ s and every shader animation would snap.
+    const dt = clamp(snapshot.simTime - this.lastSnapshotAt, 0, 0.25);
     // Body motion is interpolated in the renderer, not delayed here: draw the
     // newest state we have, immediately.
     this.scene.selectedId = this.selectedId;

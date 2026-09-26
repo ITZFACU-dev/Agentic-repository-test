@@ -99,7 +99,6 @@ export class Inspector {
 
     const graph = section(body, 'Energy conservation');
     this.energy = new EnergyGraph(graph);
-    this.root.appendChild(body);
     parent.appendChild(this.root);
   }
 

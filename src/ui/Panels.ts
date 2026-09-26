@@ -44,6 +44,7 @@ export type OverlayName =
   | 'habitability'
   | 'vectors'
   | 'lagrange'
+  | 'accretion'
   | 'exaggeration'
   | 'atmosphereQuality'
   | 'atmosphereDensity'
@@ -245,6 +246,7 @@ export class LeftPanel {
     toggle(overlays, 'spacetime curvature grid', false, (v) => this.actions.overlay('grid', v));
     toggle(overlays, 'habitable-zone ribbons', false, (v) => this.actions.overlay('habitability', v));
     toggle(overlays, 'L1–L5 Lagrange markers', false, (v) => this.actions.overlay('lagrange', v));
+    toggle(overlays, 'relativistic accretion disk', false, (v) => this.actions.overlay('accretion', v));
     slider(overlays, {
       label: 'body size exaggeration',
       min: 1,
