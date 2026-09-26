@@ -308,7 +308,7 @@ export class HDRPipeline {
       const h = src.height;
       this.blurPass.material.uniforms.tDiffuse.value = src.texture;
       this.blurPass.material.uniforms.uDirection.value.set(1 / w, 0);
-      this.blurPass.material.uniforms.uRadius.value = 1 + i * 0.6;
+      this.blurPass.material.uniforms.uRadius.value = 1 + i * 0.75;
       this.draw(this.blurPass, scratch);
       this.blurPass.material.uniforms.tDiffuse.value = scratch.texture;
       this.blurPass.material.uniforms.uDirection.value.set(0, 1 / h);

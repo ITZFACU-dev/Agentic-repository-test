@@ -264,18 +264,21 @@ export class App {
         this.scene.setRoster(message.entries);
         // Frame and select the body the lab is about, so the inspector is
         // populated the moment the preset appears rather than after a click.
-        const focusName = this.pendingCamera?.focus;
-        if (focusName) {
-          const entry = message.entries.find((e) => e.name.toLowerCase() === focusName.toLowerCase());
+        const camera = this.pendingCamera;
+        if (camera && camera.focus) {
+          const entry = message.entries.find((e) => e.name.toLowerCase() === camera.focus.toLowerCase());
           if (entry) {
             this.selectedId = entry.id;
             this.scene.selectedId = entry.id;
             this.post({ type: 'select', id: entry.id });
             this.post({ type: 'focus', id: entry.id });
-            if (this.pendingCamera) this.rig.setFraming(this.pendingCamera.distance, this.pendingCamera.elevation);
+            // The camera can only lock on once a snapshot has given us the
+            // body's position, so arm it here and let applySnapshot fire.
+            this.pendingFollow = entry.id;
+            this.rig.setFraming(camera.distance, camera.elevation);
           }
-          this.pendingCamera = null;
         }
+        this.pendingCamera = null;
         break;
       }
       case 'snapshot':
@@ -296,6 +299,8 @@ export class App {
   }
 
   private pendingCamera: { focus: string; distance: number; elevation: number } | null = null;
+  /** Body the camera should lock onto as soon as its position is known. */
+  private pendingFollow = -1;
   private recycleQueue: {
     pos: Float32Array;
     vel: Float32Array;
@@ -356,6 +361,15 @@ export class App {
       );
     }
 
+    if (this.pendingFollow >= 0) {
+      const found = this.scene.lookup(this.pendingFollow);
+      if (found) {
+        this.rig.followEnabled = true;
+        this.rig.focusOn(this.pendingFollow, found.position, found.radius, 6);
+        this.pendingFollow = -1;
+      }
+    }
+
     const loading = document.getElementById('loading');
     if (loading && !loading.classList.contains('done')) loading.classList.add('done');
   }
@@ -387,8 +401,16 @@ export class App {
       this.selectedId = id;
       this.scene.selectedId = id;
       this.post({ type: 'select', id });
-      if (id >= 0) this.post({ type: 'focus', id });
-      else this.inspector.setEmpty('click a body to inspect it');
+      if (id >= 0) {
+        this.post({ type: 'focus', id });
+        const found = this.scene.lookup(id);
+        if (found) {
+          this.rig.followEnabled = true;
+          this.rig.focusOn(id, found.position, found.radius, 6);
+        }
+      } else {
+        this.inspector.setEmpty('click a body to inspect it');
+      }
     });
     this.canvas.addEventListener('pointermove', (e) => {
       const rect = this.canvas.getBoundingClientRect();

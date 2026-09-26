@@ -3,8 +3,8 @@
 precision highp float;
 varying vec2 vUv;
 uniform sampler2D tDiffuse;
-uniform vec2 uDirection;   // UV-space axis, already scaled by the mip size
-uniform float uRadius;
+uniform vec2 uDirection;   // UV step of one texel along the blur axis
+uniform float uRadius;     // blur radius in texels (grows with the mip level)
 
 void main() {
   float w0 = 0.2270270270;
@@ -17,10 +17,13 @@ void main() {
   float o3 = 5.0769230769;
   float o4 = 6.9230769231;
 
-  vec2 step1 = uDirection * o1 * uRadius / 8.0;
-  vec2 step2 = uDirection * o2 * uRadius / 8.0;
-  vec2 step3 = uDirection * o3 * uRadius / 8.0;
-  vec2 step4 = uDirection * o4 * uRadius / 8.0;
+  // The offsets are in texels, and uDirection is one texel wide, so the taps
+  // land at ±1.4, ±3.2, ±5.1 and ±6.9 texels — a 14-texel-wide kernel that
+  // widens with the mip level.
+  vec2 step1 = uDirection * o1 * uRadius;
+  vec2 step2 = uDirection * o2 * uRadius;
+  vec2 step3 = uDirection * o3 * uRadius;
+  vec2 step4 = uDirection * o4 * uRadius;
 
   vec3 sum = texture2D(tDiffuse, vUv).rgb * w0;
   sum += (texture2D(tDiffuse, vUv + step1).rgb + texture2D(tDiffuse, vUv - step1).rgb) * w1;
