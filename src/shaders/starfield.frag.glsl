@@ -17,6 +17,7 @@ uniform float uBrightness;
 uniform float uSeed;
 uniform float uNebula;
 uniform float uMilkyWay;     // 0..1 visibility of the galactic band
+uniform float uDetail;      // 0 = bright stars only, 1 = full catalogue
 uniform mat3 uGalacticBasis;
 
 // Octahedral mapping: a direction becomes a point in the unit square.
@@ -56,15 +57,17 @@ void main() {
   vec3 dir = normalize(vDir);
   vec3 color = vec3(0.0);
 
-  // Two shells: a dense faint layer for the Milky Way's unresolved stars and a
-  // sparse bright layer for naked-eye stars.
-  const float RES = 512.0;
   vec2 uv = octEncode(dir);
-  vec2 g = uv * RES;
-  vec2 cell = floor(g);
-  for (int dy = -1; dy <= 1; dy++) {
-    for (int dx = -1; dx <= 1; dx++) {
-      starCell(cell + vec2(float(dx), float(dy)), uv, RES, color);
+  // Fine shell: the unresolved background. Nine cells per pixel is the price of
+  // a continuous field, so it is the first thing to go on a slow machine.
+  if (uDetail > 0.4) {
+    const float RES = 512.0;
+    vec2 g = uv * RES;
+    vec2 cell = floor(g);
+    for (int dy = -1; dy <= 1; dy++) {
+      for (int dx = -1; dx <= 1; dx++) {
+        starCell(cell + vec2(float(dx), float(dy)), uv, RES, color);
+      }
     }
   }
   // Bright-star shell on a coarser grid, so a few stars outshine the rest.
@@ -78,17 +81,18 @@ void main() {
   }
 
   // Milky Way: a band of unresolved light along the galactic plane, with dust
-  // lanes carved out by fbm.
+  // lanes carved out by fbm. Octave counts follow the quality tier.
   vec3 gal = uGalacticBasis * dir;
   float band = exp(-pow(abs(gal.y) * 6.5, 1.7));
-  float dust = fbm(dir * 7.0 + uSeed * 3.0, 6, 2.1, 0.55);
-  float clumps = fbm(dir * 22.0 - 4.0, 5, 2.0, 0.5);
+  int mwOct = uDetail > 0.75 ? 6 : uDetail > 0.5 ? 4 : 3;
+  float dust = fbm(dir * 7.0 + uSeed * 3.0, mwOct, 2.1, 0.55);
+  float clumps = fbm(dir * 22.0 - 4.0, mwOct > 4 ? mwOct - 1 : mwOct, 2.0, 0.5);
   vec3 bandColor = mix(vec3(0.16, 0.17, 0.26), vec3(0.34, 0.28, 0.22), dust) * 0.75;
   color += bandColor * band * (0.45 + 0.9 * clumps) * uMilkyWay * 18.0;
   color += vec3(0.03, 0.04, 0.07) * band * uMilkyWay;
 
-  // Faint nebular emission.
-  float neb = pow(max(fbm(dir * 3.5 + 8.0, 5, 2.2, 0.5), 0.0), 2.5);
+  // Faint nebular emission (skipped entirely on low tiers).
+  float neb = uDetail > 0.55 ? pow(max(fbm(dir * 3.5 + 8.0, 4, 2.2, 0.5), 0.0), 2.5) : 0.0;
   vec3 nebColor = mix(vec3(0.35, 0.08, 0.22), vec3(0.05, 0.18, 0.32), fract(uSeed * 0.37));
   color += nebColor * neb * uNebula * 6.0;
 

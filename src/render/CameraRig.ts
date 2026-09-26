@@ -47,6 +47,9 @@ export class CameraRig {
   private lastY = 0;
   private lastPointerButton = 0;
   private readonly keys = new Set<string>();
+  /** Active pointers, so two fingers can pinch and one can orbit. */
+  private readonly pointers = new Map<number, { x: number; y: number }>();
+  private pinchDistance = 0;
 
   /** Camera-relative view-projection, refreshed every frame. */
   readonly viewProjection = new THREE.Matrix4();
@@ -145,17 +148,38 @@ export class CameraRig {
     const dom = this.domElement;
     dom.addEventListener('pointerdown', (e) => {
       if (e.button === 2) return;
+      this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       this.dragging = true;
       this.lastPointerButton = e.button;
       this.lastX = e.clientX;
       this.lastY = e.clientY;
       dom.setPointerCapture(e.pointerId);
+      if (this.pointers.size === 2) this.pinchDistance = this.pointerSpread();
     });
     dom.addEventListener('pointerup', (e) => {
-      this.dragging = false;
+      this.pointers.delete(e.pointerId);
+      this.dragging = this.pointers.size > 0;
+      this.pinchDistance = 0;
       if (dom.hasPointerCapture(e.pointerId)) dom.releasePointerCapture(e.pointerId);
     });
+    dom.addEventListener('pointercancel', (e) => {
+      this.pointers.delete(e.pointerId);
+      this.dragging = false;
+      this.pinchDistance = 0;
+    });
     dom.addEventListener('pointermove', (e) => {
+      if (!this.pointers.has(e.pointerId)) return;
+      this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      // Two fingers: pinch to zoom, and drag together to pan.
+      if (this.pointers.size === 2) {
+        const spread = this.pointerSpread();
+        if (this.pinchDistance > 0 && spread > 0) {
+          const factor = this.pinchDistance / spread;
+          this.targetDistance = clamp(this.targetDistance * factor, this.minDistance, this.maxDistance);
+        }
+        this.pinchDistance = spread;
+        return;
+      }
       if (!this.dragging) return;
       const dx = e.clientX - this.lastX;
       const dy = e.clientY - this.lastY;
@@ -185,6 +209,21 @@ export class CameraRig {
     dom.addEventListener('contextmenu', (e) => e.preventDefault());
     window.addEventListener('keydown', (e) => this.keys.add(e.code));
     window.addEventListener('keyup', (e) => this.keys.delete(e.code));
+    // Pinch-zoom on trackpads arrives as a ctrl-modified wheel; browsers
+    // reserve it for page zoom, so the canvas must claim it.
+    dom.addEventListener(
+      'touchstart',
+      (e) => {
+        if (e.touches.length > 1) e.preventDefault();
+      },
+      { passive: false },
+    );
+  }
+
+  private pointerSpread(): number {
+    const [a, b] = [...this.pointers.values()];
+    if (!a || !b) return 0;
+    return Math.hypot(a.x - b.x, a.y - b.y);
   }
 
   /** Fly to a saved framing (used when a preset loads). */

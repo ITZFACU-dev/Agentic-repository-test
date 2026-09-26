@@ -20,6 +20,7 @@ uniform float uScale;           // metres → render units
 uniform float uTime;
 uniform float uExaggeration;    // multiplies radii for readability
 uniform float uRotationSpeed;
+uniform float uPixelScale;   // screen height / (2 tan(fov/2)), for LOD
 
 varying vec3 vNormal;
 varying vec3 vWorldPos;
@@ -30,6 +31,7 @@ varying float vFlags;
 varying float vSeed;
 varying float vRadius;
 varying vec3 vSpherePos;
+varying float vScreenSize;   // projected radius in pixels, for detail LOD
 
 mat3 axisRotation(vec3 axis, float angle) {
   float s = sin(angle);
@@ -67,6 +69,8 @@ void main() {
   // still see and click them — the physics radii are untouched.
   float dist = max(length(uCameraPosition - world), 1.0);
   float angular = radius / dist;
+  // Projected size in pixels: drives how many noise octaves are worth sampling.
+  vScreenSize = angular * uPixelScale;
   if (angular < 1.5e-4) {
     float boost = 1.5e-4 / angular;
     vec3 dir = normalize(spun);

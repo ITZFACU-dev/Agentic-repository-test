@@ -9,6 +9,7 @@
  */
 
 import { el, fmt, kvRow, section } from './dom';
+import { exportRow } from './Exporter';
 import type { BodyTelemetry } from '../sim/protocol';
 import { EnergyGraph } from './EnergyGraph';
 import { AU, SOLAR_MASS } from '../core/units';
@@ -24,7 +25,7 @@ export class Inspector {
   private systemRows: Record<string, HTMLElement> = {};
   private noteEl: HTMLDivElement;
 
-  constructor(parent: HTMLElement) {
+  constructor(parent: HTMLElement, private readonly onExport: { csv: () => void; state: () => void; summary: () => void }) {
     this.root = el('div', 'panel');
     this.root.id = 'right';
     const head = el('div', 'head');
@@ -76,6 +77,8 @@ export class Inspector {
       ['albedo', 'bond albedo'],
       ['greenhouse', 'greenhouse forcing'],
       ['tidal', 'tidal heating'],
+      ['accretion', 'accretion luminosity'],
+      ['eddington', 'fraction of Eddington'],
       ['hz', 'habitable zone'],
       ['atmos', 'atmosphere'],
       ['ring', 'ring system'],
@@ -99,6 +102,8 @@ export class Inspector {
 
     const graph = section(body, 'Energy conservation');
     this.energy = new EnergyGraph(graph);
+    const exportSection = section(body, 'Take the data with you');
+    exportRow(exportSection, this.onExport);
     parent.appendChild(this.root);
   }
 
@@ -111,7 +116,7 @@ export class Inspector {
     this.noteEl.style.display = 'none';
   }
 
-  update(t: BodyTelemetry | null, primaryName: string): void {
+  update(t: BodyTelemetry | null): void {
     if (!t) {
       this.setEmpty('click a body to inspect it');
       return;
@@ -151,7 +156,7 @@ export class Inspector {
     set(this.physRows, 'radius', fmt.metres(t.radius));
     set(this.physRows, 'density', `${(t.mass / Math.max(volume, 1)).toPrecision(4)} kg/m³`);
     set(this.physRows, 'gravity', `${((6.6743e-11 * t.mass) / Math.max(t.radius * t.radius, 1)).toPrecision(3)} m/s²`);
-    set(this.physRows, 'force', fmt.energy(Math.hypot(t.force[0], t.force[1], t.force[2])) + '');
+    set(this.physRows, 'force', `${fmt.energy(Math.hypot(t.force[0], t.force[1], t.force[2]))}`);
     set(this.physRows, 'accel', `${Math.hypot(t.acc[0], t.acc[1], t.acc[2]).toExponential(3)} m/s²`);
     set(this.physRows, 'composition', t.composition);
 
@@ -159,7 +164,19 @@ export class Inspector {
     set(this.thermalRows, 'teq', fmt.temp(t.equilibriumTemp));
     set(this.thermalRows, 'albedo', t.albedo.toFixed(3));
     set(this.thermalRows, 'greenhouse', t.greenhouse > 0 ? `+${(t.greenhouse * 100).toFixed(1)} %` : 'none');
-    set(this.thermalRows, 'tidal', t.tidalHeating > 0 ? `${t.tidalHeating.toExponential(2)} W` : '—');
+    set(this.thermalRows, 'tidal', fmt.power(t.tidalHeating));
+    set(
+      this.thermalRows,
+      'accretion',
+      t.accretion > 0 ? `${fmt.power(t.accretion)}${t.accretionFuel > 0 ? ` (${fmt.mass(t.accretionFuel)} left to feed)` : ''}` : '—',
+      t.accretion > 0 ? 'warn' : undefined,
+    );
+    set(
+      this.thermalRows,
+      'eddington',
+      t.accretion > 0 ? `${(t.eddingtonFraction * 100).toFixed(1)} %` : '—',
+      t.eddingtonFraction > 0.98 ? 'bad' : t.accretion > 0 ? 'warn' : undefined,
+    );
     set(
       this.thermalRows,
       'hz',
@@ -169,7 +186,7 @@ export class Inspector {
     set(this.thermalRows, 'atmos', t.atmosphere ? `H = ${(t.atmosphere.scaleHeight / 1000).toFixed(1)} km, β_r = ${t.atmosphere.betaR.toExponential(1)}` : 'none');
     set(this.thermalRows, 'ring', t.ring ? `${fmt.metres(t.ring.innerRadius)} – ${fmt.metres(t.ring.outerRadius)}` : 'none');
 
-    set(this.systemRows, 'primary', primaryName);
+    set(this.systemRows, 'primary', t.primaryName || (t.kind === 'star' ? '— (dominant mass)' : '—'));
     set(this.systemRows, 'distance', fmt.metres(t.distanceToPrimary));
     set(this.systemRows, 'hill', e && e.hillRadius > 0 ? fmt.metres(e.hillRadius) : '—');
     set(this.systemRows, 'rocheF', e && e.rocheFluid > 0 ? fmt.metres(e.rocheFluid) : '—');
@@ -190,6 +207,11 @@ export class Inspector {
 /** A short teaching note derived from the body's own numbers. */
 function massNote(t: BodyTelemetry): string | null {
   const suns = t.mass / SOLAR_MASS;
+  if (t.kind === 'blackhole' || t.kind === 'neutronstar') {
+    if (t.accretion > 0) {
+      return `Accreting at ${(t.eddingtonFraction * 100).toFixed(1)} % of the Eddington limit: L = η Ṁ c² with η = 0.1, capped by L_Edd = 4πGMm_p c/σ_T. The debris is what lights the disk.`;
+    }
+  }
   if (t.kind === 'blackhole') {
     const rs = (2 * 6.6743e-11 * t.mass) / (2.99792458e8 ** 2);
     return `Event horizon radius r_s = 2GM/c² = ${fmt.metres(rs)}. The photon sphere sits at 1.5 r_s and the shadow we see is 2.6 r_s across.`;

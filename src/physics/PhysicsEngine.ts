@@ -22,7 +22,7 @@
 
 import { BarnesHut } from './BarnesHut';
 import { clamp } from '../core/mathx';
-import { AU, C, CHANDRASEKHAR_LIMIT, G, SIGMA_SB, SOLAR_MASS, TOV_LIMIT, schwarzschildRadius } from '../core/units';
+import { AU, C, CHANDRASEKHAR_LIMIT, G, SIGMA_SB, SOLAR_MASS, TOV_LIMIT, eddingtonLuminosity, schwarzschildRadius } from '../core/units';
 import type { AtmosphereSpec, BodyKind, BodySpec, Composition, RingSpec } from './CelestialBody';
 import {
   DEFAULT_COMPOSITION,
@@ -242,7 +242,14 @@ export class PhysicsEngine {
   atmospheres: (AtmosphereSpec | null)[] = [];
   rings: (RingSpec | null)[] = [];
 
-  /** Instanced render side of ring systems produced by Roche disruption. */
+  /**
+   * Instanced render side of ring systems produced by Roche disruption.
+   *
+   * `ringMass` is a *display* quantity — the mass that is now drawn as ring
+   * particles. Physically that mass still lives in `mass[]` (a bound ring
+   * accretes onto its primary), so never add it to a mass audit; use
+   * `accretionRadiatedMass` and `escapingMass` for the ledger.
+   */
   ringParticles: Int32Array;
   ringInner: Float64Array;
   ringOuter: Float64Array;
@@ -251,10 +258,35 @@ export class PhysicsEngine {
   destroyedCount = 0;
   /** Cumulative mass converted into rings and lost to accretion. */
   ringMassTotal = 0;
+  private fluxScratch = new Float64Array(256);
+  /** Length of the most recent integration sub-step, seconds (sweep test). */
+  private lastStepSeconds = 0;
+
   /** Radiation-pressure acceleration field, refreshed by recomputeForces(). */
   radAccel: Float64Array;
   /** Luminosity as authored, before the what-if sunlight slider scales it. */
   baseLuminosity: number[] = [];
+
+  // ── Accretion feedback ─────────────────────────────────────────────────────
+  // Matter that falls onto a compact object does not just disappear: a fraction
+  // of its rest mass is radiated. We keep the swallowed mass in a reservoir and
+  // drain it exponentially, so a disruption produces a *light curve* (rise, peak,
+  // decay) rather than a single-frame flash — and the emitted luminosity feeds
+  // straight back into the thermodynamics and the radiation-pressure solver.
+  //
+  /** Mass waiting to be radiated per body, kg. */
+  accretionReservoir: Float64Array;
+  /** Current accretion luminosity per body, W. */
+  accretionLuminosity: Float64Array;
+  /** Total rest mass radiated away since load, kg (for the mass audit). */
+  accretionRadiatedMass = 0;
+  /** Mass flung away on unbound orbits by disruption events, kg. */
+  escapingMass = 0;
+  /** Radiative efficiency η: 0.057 (Schwarzschild) … 0.42 (maximally spinning). */
+  accretionEfficiency = 0.1;
+  /** e-folding time of the accretion light curve, seconds. */
+  accretionTimescale = 3e6;
+  private luminosityScale = 1;
 
   events: PhysicsEvent[] = [];
   diagnostics: EngineDiagnostics = {
@@ -309,6 +341,8 @@ export class PhysicsEngine {
     this.ringOuter = new Float64Array(capacity);
     this.ringMass = new Float64Array(capacity);
     this.radAccel = f3();
+    this.accretionReservoir = f1();
+    this.accretionLuminosity = f1();
   }
 
   /** Gravitational constant actually in use (scaled by the what-if slider). */
@@ -373,6 +407,8 @@ export class PhysicsEngine {
     this.ringOuter = f1(this.ringOuter);
     this.ringMass = f1(this.ringMass);
     this.radAccel = f3(this.radAccel);
+    this.accretionReservoir = f1(this.accretionReservoir);
+    this.accretionLuminosity = f1(this.accretionLuminosity);
     this.capacity = cap;
     this.scratch = null;
   }
@@ -395,6 +431,10 @@ export class PhysicsEngine {
     this.baseLuminosity = [];
     this.ringParticles.fill(0);
     this.ringMass.fill(0);
+    this.accretionReservoir.fill(0);
+    this.accretionLuminosity.fill(0);
+    this.accretionRadiatedMass = 0;
+    this.escapingMass = 0;
     for (const s of specs) this.add(s, true);
     this.recomputeForces();
     this.updateDiagnostics();
@@ -447,6 +487,8 @@ export class PhysicsEngine {
     this.isTracer[i] = spec.mass <= 0 ? 1 : 0;
     if (this.isTracer[i]) this.mass[i] = 0;
     this.k2overQ[i] = k2OverQDefault(spec.kind, this.composition[i]);
+    this.accretionReservoir[i] = 0;
+    this.accretionLuminosity[i] = 0;
     this.atmospheres[i] = spec.atmosphere ?? null;
     this.rings[i] = spec.rings ?? null;
     if (spec.rings) {
@@ -516,6 +558,8 @@ export class PhysicsEngine {
     this.ringInner[i] = this.ringInner[last];
     this.ringOuter[i] = this.ringOuter[last];
     this.ringMass[i] = this.ringMass[last];
+    this.accretionReservoir[i] = this.accretionReservoir[last];
+    this.accretionLuminosity[i] = this.accretionLuminosity[last];
   }
 
   removeById(id: number): boolean {
@@ -681,7 +725,10 @@ export class PhysicsEngine {
    */
   private requiredSubsteps(dt: number): number {
     if (!this.params.adaptiveSubsteps) return 1;
-    const minTau = 0.04;
+    // Safety factor on the force-change timescale: 0.06 resolves a circular
+    // orbit in ~105 steps (RK4 error ~1e-11 per orbit) while keeping the
+    // sub-step count low enough that a 261-body system still runs in real time.
+    const minTau = 0.06;
     const count = this.count;
     const pairwise = count <= 256;
     let tauMin = Infinity;
@@ -725,6 +772,7 @@ export class PhysicsEngine {
 
   /** Advance the simulation by dt seconds. */
   step(dt: number): void {
+    this.lastStepSeconds = Math.abs(dt);
     const t0 = performance.now();
     const sub = this.requiredSubsteps(dt);
     const h = dt / sub;
@@ -1127,10 +1175,91 @@ export class PhysicsEngine {
 
   // ── Post-step physics ─────────────────────────────────────────────────────
 
+  /**
+   * Accretion light curve.
+   *
+   * For every body with mass in its reservoir, radiate a fraction
+   * 1 − exp(−dt/τ) of it at efficiency η, capped at the Eddington limit:
+   *
+   *     L = min( η Ṁ c², L_Edd )
+   *
+   * The cap is what keeps a stellar-disruption flare honest: the infall rate in
+   * a TDE far exceeds Eddington, and a real disk responds by driving a wind
+   * rather than by radiating without limit. Whatever is radiated also leaves the
+   * body's mass budget, so the books balance: total mass + radiated mass is
+   * constant to machine precision.
+   */
+  private updateAccretion(dt: number): void {
+    if (!(dt > 0)) return;
+    const c = C * this.params.cScale;
+    const c2 = c * c;
+    const tau = Math.max(this.accretionTimescale, 1);
+    const fraction = 1 - Math.exp(-dt / tau);
+    for (let i = 0; i < this.count; i++) {
+      const reservoir = this.accretionReservoir[i];
+      if (reservoir <= 0) {
+        if (this.accretionLuminosity[i] !== 0) {
+          this.accretionLuminosity[i] = 0;
+          this.syncLuminosity(i);
+        }
+        continue;
+      }
+      const dm = reservoir * fraction;
+      this.accretionReservoir[i] = reservoir - dm;
+      // Energy released if the flow were radiatively efficient: E = η dm c².
+      // A steady spherical flow cannot exceed the Eddington luminosity, so the
+      // actual energy is min(η dm c², L_Edd dt) — and the mass that energy
+      // carries away is E/c². (Getting this wrong makes the engine radiate 100 %
+      // of the infalling mass the moment the flow stops being Eddington-limited.)
+      const idealEnergy = this.accretionEfficiency * dm * c2;
+      const capEnergy = eddingtonLuminosity(this.mass[i]) * dt;
+      const energy = Math.min(idealEnergy, capEnergy);
+      const massLost = energy / c2;
+      this.mass[i] = Math.max(this.mass[i] - massLost, 0);
+      this.accretionRadiatedMass += massLost;
+      this.accretionLuminosity[i] = energy / dt;
+      this.syncLuminosity(i);
+    }
+  }
+
+  /** Total luminosity = authored (scaled) + whatever the accretion disk adds. */
+  private syncLuminosity(i: number): void {
+    this.luminosity[i] = this.baseLuminosity[i] * this.luminosityScale + this.accretionLuminosity[i];
+  }
+
+  /**
+   * Mass audit: every kilogram the engine was given is in exactly one of these
+   * places. A student (or a test) can check it at any time.
+   */
+  massAudit(): { total: number; radiated: number; escaping: number; initial: number } {
+    let total = 0;
+    for (let i = 0; i < this.count; i++) total += this.mass[i];
+    return {
+      total,
+      radiated: this.accretionRadiatedMass,
+      escaping: this.escapingMass,
+      initial: total + this.accretionRadiatedMass + this.escapingMass,
+    };
+  }
+
+  /** Mass in the accretion reservoir — the fuel for the remaining light curve. */
+  accretionFuel(): number {
+    let sum = 0;
+    for (let i = 0; i < this.count; i++) sum += this.accretionReservoir[i];
+    return sum;
+  }
+
+  /** Feed the accretion reservoir of body `i` (a disruption or a merger). */
+  addAccretion(i: number, massKg: number): void {
+    if (i < 0 || i >= this.count || !(massKg > 0)) return;
+    this.accretionReservoir[i] += massKg;
+  }
+
   private postStep(dt: number): void {
+    this.updateAccretion(dt);
     if (this.params.tidalPhysics) this.updateTides();
     if (this.params.thermodynamics) this.updateThermodynamics(dt);
-    this.checkTidalDisruption();
+    if (this.params.tidalPhysics) this.checkTidalDisruption();
     this.resolveCollisions();
     if (this.params.rocheLimitEnabled) this.checkRoche();
     if (this.params.stellarEvolution) this.checkStellarEvolution();
@@ -1149,7 +1278,10 @@ export class PhysicsEngine {
   updateThermodynamics(dt: number): void {
     const n = this.count;
     const { pos, luminosity, albedo, greenhouse, internalHeat, radius, surfaceTemp, mass, tidalHeat } = this;
-    const flux = new Array<number>(n).fill(0);
+    // Reused buffer: this runs on every step, so it must not allocate.
+    if (this.fluxScratch.length < n) this.fluxScratch = new Float64Array(Math.max(n, 256));
+    const flux = this.fluxScratch;
+    flux.fill(0, 0, n);
     for (let j = 0; j < n; j++) {
       if (luminosity[j] <= 0) continue;
       const isStar = this.kinds[j] === 'star';
@@ -1179,7 +1311,9 @@ export class PhysicsEngine {
       // Keep the *incident* flux for telemetry — never the absorbed value, or
       // each step would attenuate by another factor of (1−A).
     }
-    this.fluxCache = flux;
+    // Copy out: fluxCache is read by telemetry and must survive the next step.
+    if (this.fluxCache.length !== n) this.fluxCache = new Array<number>(n).fill(0);
+    for (let i = 0; i < n; i++) this.fluxCache[i] = flux[i];
   }
 
   /**
@@ -1300,6 +1434,18 @@ export class PhysicsEngine {
             tidalRadius,
             streamMass: this.mass[i],
           });
+          // Half the stellar debris circularises and feeds the disk; the rest
+          // escapes as the unbound tidal stream. Both halves stay on the books:
+          // the bound half joins the hole, the unbound half becomes ring mass.
+          const debris = this.mass[i];
+          const bound = debris * 0.5;
+          this.addAccretion(j, bound);
+          this.mass[j] += bound;
+          // The other half is unbound: it leaves the system, and it is what the
+          // debris stream drawn by the renderer represents.
+          this.escapingMass += debris - bound;
+          this.ringMass[j] += debris - bound;
+          this.ringMassTotal += debris - bound;
           this.removeAt(i);
           this.destroyedCount++;
           this.recomputeForces();
@@ -1319,18 +1465,32 @@ export class PhysicsEngine {
     const mode = this.params.collisionMode;
     if (mode === 'none') return;
     for (let i = 0; i < this.count; i++) {
+      if (this.isTracer[i]) continue;
       for (let j = i + 1; j < this.count; j++) {
         if (i >= this.count || j >= this.count) break;
+        if (this.isTracer[j]) continue; // massless test particles never collide
         const dx = this.pos[j * 3] - this.pos[i * 3];
         const dy = this.pos[j * 3 + 1] - this.pos[i * 3 + 1];
         const dz = this.pos[j * 3 + 2] - this.pos[i * 3 + 2];
-        if (this.isTracer[i] || this.isTracer[j]) continue; // massless test particles
         const r = Math.hypot(dx, dy, dz);
         const contact = this.radius[i] + this.radius[j];
-        if (r >= contact) continue;
         const dvx = this.vel[j * 3] - this.vel[i * 3];
         const dvy = this.vel[j * 3 + 1] - this.vel[i * 3 + 1];
         const dvz = this.vel[j * 3 + 2] - this.vel[i * 3 + 2];
+        // Swept test: two bodies can pass clean through each other inside one
+        // step when the closing speed is high — a 1e24 kg world diving onto a
+        // 10 M☉ black hole covers 4 Gm per step. Take the closest approach of
+        // the linear motion over the next step and treat that as contact.
+        if (r >= contact) {
+          const v2 = dvx * dvx + dvy * dvy + dvz * dvz;
+          if (v2 < 1e-12) continue;
+          const tStar = -(dx * dvx + dy * dvy + dz * dvz) / v2;
+          if (!(tStar > 0) || tStar > this.lastStepSeconds) continue;
+          const mx = dx + dvx * tStar;
+          const my = dy + dvy * tStar;
+          const mz = dz + dvz * tStar;
+          if (Math.hypot(mx, my, mz) >= contact) continue;
+        }
         const speed = Math.hypot(dvx, dvy, dvz);
         const mi = this.mass[i];
         const mj = this.mass[j];
@@ -1409,9 +1569,17 @@ export class PhysicsEngine {
 
     // Debris: the fraction of the impactor that is thrown clear of the merged
     // body's gravity well. v_esc of the merged body sets the scale.
+    //
+    // This has to be settled *before* the survivor's mass is set: mass may only
+    // leave the survivor if fragments are actually spawned to carry it. A
+    // compact survivor (a black hole swallows, it does not splash) and a gentle
+    // contact both keep everything.
     const vEsc = Math.sqrt((2 * Gs * total) / Math.max(this.radius[heavy], 1));
-    const ejectedFraction = this.params.fragmentation ? clamp(speed / (3.5 * vEsc), 0, 0.55) : 0;
-    const ejectedMass = ml * ejectedFraction;
+    const survivorIsCompact = this.kinds[heavy] === 'blackhole' || this.kinds[heavy] === 'neutronstar';
+    const ejectedFraction = this.params.fragmentation && !survivorIsCompact ? clamp(speed / (3.5 * vEsc), 0, 0.55) : 0;
+    const proposedEjecta = ml * ejectedFraction;
+    const willFragment = !survivorIsCompact && proposedEjecta > 1e13 && speed > 150;
+    const ejectedMass = willFragment ? proposedEjecta : 0;
     const newMass = total - ejectedMass;
     const newRadius = radiusFromMass(newMass, this.kinds[heavy], this.composition[heavy]);
     const newInertia = 0.4 * newMass * newRadius * newRadius;
@@ -1427,7 +1595,18 @@ export class PhysicsEngine {
     );
     // The contact speed already includes the acceleration through the well, so
     // the *net* energy converted to heat is ½μΔv² + PE(r) with PE negative.
-    const heatJ = Math.max(shock + -(Gs * mh * ml) / contactR, 0);
+    let heatJ = Math.max(shock + -(Gs * mh * ml) / contactR, 0);
+    // A black hole or neutron star does not get hot: the debris joins an
+    // accretion flow instead, and a fraction of its rest mass comes back out as
+    // light over the following months (see updateAccretion).
+    if (survivorIsCompact) {
+      // The debris is swallowed whole (newMass above already includes it, so the
+      // orbital dynamics see the new mass immediately) and simultaneously joins
+      // the accretion flow, which radiates a fraction of it away over the
+      // following light curve.
+      this.addAccretion(heavy, ml);
+      heatJ = 0;
+    }
     const heatK = heatJ / Math.max(newMass * MIN_HEAT_CAPACITY, 1);
     this.surfaceTemp[heavy] = clamp(this.surfaceTemp[heavy] + heatK, 1, 1e10);
     this.mass[heavy] = newMass;
@@ -1449,7 +1628,7 @@ export class PhysicsEngine {
 
     // Power-law fragment swarm, produced after the removal so indices are safe.
     let fragments = 0;
-    if (ejectedMass > 1e13 && speed > 150) {
+    if (willFragment) {
       const alpha = 1.8;
       const wanted = clamp(Math.round(Math.log10(ejectedMass / 1e13) * 4), 3, 20);
       const weights: number[] = [];
@@ -1566,6 +1745,12 @@ export class PhysicsEngine {
         this.ringMass[best] += satelliteMass;
         this.ringMassTotal += satelliteMass;
         this.destroyedCount++;
+        // Half of a tidally disrupted body stays bound and accretes; the other
+        // half is flung away on unbound orbits (this is the standard TDE
+        // picture, and it is what the debris streams in the visualisation show).
+        if (this.kinds[best] === 'blackhole' || this.kinds[best] === 'neutronstar') {
+          this.addAccretion(best, satelliteMass * 0.5);
+        }
         // Shock heating of the ring: the kinetic energy of the disruption is
         // partly thermalised, so the debris glows.
         this.surfaceTemp[best] = Math.max(this.surfaceTemp[best], clamp(this.surfaceTemp[i], 250, 3000));
@@ -1832,9 +2017,10 @@ export class PhysicsEngine {
   /** Scale every photospheric luminosity by `factor` (what-if sunlight knob). */
   scaleLuminosity(factor: number): void {
     const f = Math.max(0, factor);
+    this.luminosityScale = f;
     for (let i = 0; i < this.count; i++) {
       if (this.baseLuminosity[i] === undefined) this.baseLuminosity[i] = this.luminosity[i];
-      this.luminosity[i] = this.baseLuminosity[i] * f;
+      this.syncLuminosity(i);
       if (this.kinds[i] === 'star') {
         // A brighter star is a bigger star: L ∝ R²T⁴, so keep the spectrum
         // plausible by lifting the photospheric temperature too.

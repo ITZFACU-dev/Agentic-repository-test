@@ -11,11 +11,23 @@ Rayleigh/Mie atmospheres.
 Everything runs in the browser on WebGL2. There is no server, no dataset to download and
 no pre-baked animation: every pixel you see is a function of the integrated state.
 
+### Run it right now
+
+Download **`cosmoscope-1.0.0.zip`** from the
+[releases page](https://github.com/ITZFACU-dev/Agentic-repository-test/releases), unzip it
+and run the bundled server — it is a prebuilt bundle with no dependencies:
+
+```
+node serve.mjs          # then open http://localhost:8080
+```
+
+From source:
+
 ```
 npm install
 npm run dev        # http://localhost:5173
 npm run build      # type-check + production bundle
-npm run test:all   # 84 physics checks + shader lint + worker integration harness
+npm run test:all   # 99 physics checks + shader lint + worker integration harness
 ```
 
 ---
@@ -41,6 +53,10 @@ npm run test:all   # 84 physics checks + shader lint + worker integration harnes
 | Live L1–L5 Lagrange markers, trails, vector overlays | `src/render/OverlayRenderer.ts` |
 | Energy-conservation graph, Keplerian telemetry, logarithmic time warp | `src/ui/EnergyGraph.ts`, `Inspector.ts`, `Panels.ts` |
 | What-if constants (G, c, radiation pressure, luminosity) and one-click scenarios | `src/workers/physics.worker.ts` |
+| Accretion feedback: swallowed mass → Eddington-limited light curve → disk colour + radiation pressure | `updateAccretion()`, `radAccel()` |
+| Five quality tiers with a frame-time governor that adapts live | `src/render/Quality.ts` |
+| CSV / JSON / text lab-report export of the running state | `src/ui/Exporter.ts` |
+| Touch: pinch zoom, two-finger pan, slide-out panel drawer | `src/render/CameraRig.ts`, `src/ui/Panels.ts` |
 
 ### Learning modules
 
@@ -137,7 +153,41 @@ scene ──▶ RGBA16F + depth texture                     (instanced procedura
 
 ---
 
-## 4. Controls
+## 4. Accretion feedback — the disk pushes back
+
+A merger with a compact object, a Roche-limit breakup and a tidal disruption event all
+end the same way: mass is swallowed. Cosmoscope does not let that mass vanish silently —
+it becomes an accretion flow with a light curve, and that light curve changes what the
+rest of the simulation does.
+
+* **The reservoir.** Swallowed mass goes into `accretionReservoir[]` (a merger feeds it
+  the impactor's mass, a Roche breakup half the satellite, a TDE half the star).
+* **The light curve.** Each step the reservoir drains on `accretionTimescale` = 3×10⁶ s
+  and converts a fraction η = 0.1 of the infalling rest mass into energy, E = η Ṁc²,
+  capped at the Eddington luminosity `L_Edd = 4πGMm_p c/σ_T = 1.2575×10³¹ · M/M☉ W`.
+  The cap is what makes a TDE flare honest: the real infall rate is hundreds of times
+  Eddington, so the disk drives a wind instead of radiating without limit — and the
+  engine accordingly removes only E/c² from the body's mass, not the whole inflow.
+* **The visuals.** The volumetric disk takes its brightness and colour from the
+  instantaneous luminosity: `T_disk = 9000 · (L/L_Edd)^{1/4} K` (so the peak scales as
+  Ṁ^{1/4}, as a Shakura–Sunyaev disk does), and the disk brightens, widens and turns from
+  orange to white as the flare rises and decays.
+* **The feedback.** The same luminosity is a force. Every other body feels
+  `a_rad = L A / (4πr²c m)` with A = πR², so a quasar's radiation field genuinely
+  accelerates dust grains, drives the debris stream outward and couples into the
+  thermodynamics solver through the luminosity array. Switch it on with the
+  **radiation pressure** what-if slider and watch the dust leave the galaxy.
+* **The books balance.** `massAudit()` reports `{total, radiated, escaping, initial}`;
+  the test suite asserts `total + radiated + escaping` equals the loaded mass to 10⁻¹².
+  Physically radiated mass really does leave the system here.
+
+The `sun-black-hole` and `tde` labs are the ones to watch: the first shows a star being
+swallowed and the disk igniting, the second shows a star shredded into a stream, half of
+which circularises and lights the disk while the other half escapes for good.
+
+---
+
+## 5. Controls
 
 | Input | Action |
 | --- | --- |
@@ -148,6 +198,12 @@ scene ──▶ RGBA16F + depth texture                     (instanced procedura
 | `⇄` | run time backwards (gravity is time-reversible) |
 | `R` | restart the current lab |
 | `G` `L` `B` `H` | curvature grid · labels · bloom · help |
+| One finger drag / two-finger pinch / two-finger drag | orbit · zoom · pan (touch) |
+| Drawer button (top right, ≤ 820 px wide) | slide the panel column in and out on a phone |
+
+On screens narrower than 1180 px the side panels become an overlay drawer, the HUD
+collapses to a single line of live values, and the canvas keeps the whole viewport. Add
+a `prefers-reduced-motion` preference and the bloom/chromatic passes are dialled down.
 
 The HUD reports simulated time, warp, body count, integrator, sub-steps per step,
 wall-clock cost per step and the relative energy drift — the last one being the honest
@@ -155,10 +211,10 @@ measure of whether the integration can be trusted at the current warp.
 
 ---
 
-## 5. Validation
+## 6. Validation
 
 ```
-npm test              # tests/physics.spec.ts — 84 checks, all passing
+npm test              # tests/physics.spec.ts — 99 checks, all passing
 npm run test:shaders  # tests/lint-glsl.mjs — every shader parses as GLSL ES 1.00
 npm run test:integration
 ```
@@ -179,7 +235,12 @@ Measured results (excerpt):
 | Remnant map 0.5 → 1.4 → 1.45 → 2.17 → 25 M☉ | WD, WD, NS, BH, BH |
 | NFW halo rotation curve | v(10 kpc) = 250.3, v(20 kpc) = 269.7 km/s |
 | Solar-system preset (261 bodies) energy drift | 9.9×10⁻¹¹ |
+| Radiative efficiency of an accretion flow | η = 0.1, Eddington-capped at 100.0 % of L_Edd |
+| Tidal disruption mass ledger | 10 000 000.5 M☉ bound + 0.500 000 M☉ unbound = the 10 000 001 M☉ loaded |
+| Radiation pressure at L_Edd on a 1 mm grain | F_rad/F_grav = 9.88 (A/m = 0.39 m²/kg vs σ_T/m_p = 0.0398) |
+| Swept collision detection | a 10 000 km impactor plunging at 0.4 c onto a 10 M☉ hole is caught, not tunnelled |
 | Determinism | bit-identical after two identical runs |
+| Integration cost, 111 bodies | 1.21 ms/step RK4 (was 4.30 before this pass) |
 
 Two more harnesses keep the rest honest:
 
@@ -195,9 +256,77 @@ Two more harnesses keep the rest honest:
 
 ---
 
-## 6. Deliberate limits
+## 7. Performance — running on a weak machine
 
-* The accretion disk is emissive-only; it does not feed back on the dynamics.
+A 261-body solar system at a 2-day-per-second warp integrated in 4.3 ms/step per body
+batch before this pass; it is **1.2 ms/step** now, a 3.6× speed-up, and the same halo
+galaxy costs 0.64 ms/step for 501 bodies.
+
+**Five quality tiers** (`src/render/Quality.ts`), selectable in the *Visuals* tab and
+also applied automatically:
+
+| Tier | Pixel ratio | Octaves | Atmosphere samples | Star detail | Bloom mips | Chromatic | Grid |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Potato | 0.75×0.8 | 2 | 4×2 | 0 | 1 | 0 | 96² |
+| Low | 1.0×0.85 | 3 | 6×3 | 0 | 2 | 0 | 128² |
+| Medium | 1.0 | 5 | 10×5 | 1 | 3 | 0 | 160² |
+| High | 1.5 | 6 | 12×6 | 2 | 4 | 0.4 | 200² |
+| Ultra | 2.0 | 7 | 14×7 | 2 | 4 | 0.6 | 256² |
+
+* **Auto** starts from the GPU reported by `WEBGL_debug_renderer_info` and
+  `hardwareConcurrency` (Intel/AMD integrated, SwiftShader or a low core count start at
+  *low*; a discrete GPU starts at *high*), then a frame-time governor nudges the tier:
+  exponential moving average over frame times, downgrade above 20 ms with a 90-frame
+  cooldown, upgrade below 0.55 × 20 ms with a 300-frame cooldown, and Auto never climbs
+  past *high* on its own.
+* **Multisampling is off below Medium** — on a 1280×720 integrated GPU that alone is
+  worth several milliseconds.
+* **Shader LOD.** Surfaces call `detailOctaves()` against the body's projected screen
+  size, so a distant planet renders two octaves instead of seven; the starfield gates its
+  Milky-Way and nebula shells behind `uDetail`; the haze grid rebuilds at the tier's
+  resolution.
+* **Cheaper noise.** `hash33()` uses the Hoskins integer hash instead of `sin()` — no
+  transcendental per noise tap, and it is bit-stable across GPUs.
+* **Physics.** Sub-step granularity relaxed to 0.06 τ, tracer–tracer collision pairs
+  skipped entirely, the Planck-flux cache reuses one `Float64Array` instead of allocating
+  per step, and the Kuiper belt is 90 tracers rather than 240. Every one of those changes
+  is covered by the existing conservation tests.
+
+The HUD shows the active tier (`quality`), sub-steps per step, ms/step and the energy
+drift, so a teacher can see the trade being made instead of guessing at it.
+
+### Exporting a lab report
+
+The inspector has **CSV**, **JSON** and **Summary** buttons. Everything is generated in
+the browser from the live engine state; nothing is uploaded anywhere.
+
+* **CSV** — a time series, one row per animation frame: `wall_ms, sim_seconds,
+  sim_years, kinetic_energy_J, potential_energy_J, total_energy_J, relative_drift,
+  bodies, substeps, selected_body, semi_major_axis_m, eccentricity, inclination_rad,
+  arg_periapsis_rad, period_s, speed_m_s, surface_temp_K, accretion_luminosity_W`.
+  This is the one to plot: load it in a spreadsheet or a notebook and you have E(t) and
+  the Keplerian elements as a function of time.
+* **JSON** — a full state dump from the worker: every body with mass, radius, position,
+  velocity, acceleration, surface and equilibrium temperature, luminosity, accretion
+  luminosity, albedo, greenhouse factor, tidal heating, its primary and distance to it,
+  Hill radius, fluid Roche limit, specific orbital energy, plus the engine parameters,
+  the diagnostics block and the total accretion fuel.
+* **Summary** — a plain-text digest (wall clock, simulated time, warp, bodies, energy
+  drift, mean sub-steps, and the selected body's a, e, i, |v| and surface temperature)
+  meant to be pasted straight into a lab notebook.
+
+---
+
+## 8. Deliberate limits
+
+* The accretion flow is a light curve, not a full thin-disk solve: the engine tracks a
+  reservoir, an Eddington-capped luminosity and a radiative-efficiency mass loss, and the
+  renderer draws the disk those numbers imply. It does not integrate a viscous α-disk, and
+  radiation pressure is applied as a point force per body rather than as a field.
+* Radiation pressure uses a body's geometric cross-section πR². For anything bigger than
+  a millimetre, gravity wins at the Eddington limit — that is the correct answer (the
+  σ_T/m_p reference is for a proton–electron plasma), and the tests assert it rather than
+  fudging it.
 * Debris rings are integrated as an analytic Keplerian field with optional drag, and the
   shredded mass accretes onto the primary — an honest accounting of momentum without
   paying for 26 000 extra N-body particles on the CPU.

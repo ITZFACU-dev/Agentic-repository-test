@@ -32,6 +32,7 @@ export class Starfield {
         uSeed: { value: 17.0 },
         uNebula: { value: 0.6 },
         uMilkyWay: { value: 1.0 },
+        uDetail: { value: 1 },
         uGalacticBasis: { value: new THREE.Matrix3() },
       },
       side: THREE.BackSide,
@@ -76,5 +77,10 @@ export class Starfield {
 
   setMilkyWay(value: number): void {
     this.material.uniforms.uMilkyWay.value = value;
+  }
+
+  /** 0 = bright stars only, 1 = full catalogue with the Milky Way. */
+  setDetail(value: number): void {
+    this.material.uniforms.uDetail.value = Math.max(0, Math.min(1, value));
   }
 }

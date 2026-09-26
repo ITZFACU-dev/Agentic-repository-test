@@ -9,6 +9,7 @@
 
 import { el, fmt, warpLabel } from './dom';
 import type { Diagnostics } from '../sim/protocol';
+import type { QualityProfile } from '../render/Quality';
 
 interface Readout {
   value: HTMLElement;
@@ -46,6 +47,7 @@ export class HUD {
     make('step', 'ms / step', '—');
     make('drift', 'energy drift', '—');
     make('fps', 'fps', '—');
+    make('quality', 'quality', '—');
     const warn = el('div', 'pill warn', 'warp exceeds resolution');
     warn.style.display = 'none';
     warn.title = 'The requested time warp is too large to integrate accurately; reduce it to restore full sub-stepping.';
@@ -78,6 +80,16 @@ export class HUD {
     const d = this.readouts.drift.value;
     d.textContent = `${(drift * 100).toExponential(2)} %`;
     d.className = Math.abs(drift) < 1e-6 ? 'good' : Math.abs(drift) < 1e-3 ? 'warn' : 'bad';
+  }
+
+  /** Quality tier + measured frame time, so the tier is never a mystery. */
+  setQuality(profile: QualityProfile, auto: boolean, frameMs = 0): void {
+    const r = this.readouts.quality;
+    if (!r) return;
+    r.value.textContent = `${profile.label}${auto ? ' · auto' : ''}`;
+    r.value.title = auto
+      ? `The tuner is watching the frame time and will move the tier up or down on its own (${frameMs.toFixed(1)} ms/frame).`
+      : 'Quality is pinned by hand; set it back to Auto to let the tuner decide.';
   }
 
   setDegraded(degraded: boolean): void {

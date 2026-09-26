@@ -76,7 +76,6 @@ export class BodyRenderer {
   private spinPhase = 0;
   exaggeration = 1;
   rotationSpeed = 1;
-  surfaceDetail = 1;
 
   constructor(capacity = 512) {
     this.capacity = capacity;
@@ -99,6 +98,7 @@ export class BodyRenderer {
         uAmbient: { value: new THREE.Color(0.03, 0.035, 0.05) },
         uLavaThreshold: { value: 1100 },
         uSurfaceDetail: { value: 1 },
+        uPixelScale: { value: 1000 },
       },
     });
     this.atmosMaterial = new THREE.ShaderMaterial({
@@ -389,8 +389,17 @@ export class BodyRenderer {
     this.bodyMaterial.uniforms.uTime.value = time;
     this.bodyMaterial.uniforms.uExaggeration.value = this.exaggeration;
     this.bodyMaterial.uniforms.uRotationSpeed.value = this.rotationSpeed;
-    this.bodyMaterial.uniforms.uSurfaceDetail.value = this.surfaceDetail;
     this.atmosMaterial.uniforms.uExaggeration.value = this.exaggeration;
+  }
+
+  /** Render-space resolution hint so the surface shader can drop octaves. */
+  setPixelScale(value: number): void {
+    this.bodyMaterial.uniforms.uPixelScale.value = value;
+  }
+
+  /** Octave budget for procedural surfaces (2 = cheapest, 7 = full detail). */
+  setDetail(octaves: number): void {
+    this.bodyMaterial.uniforms.uSurfaceDetail.value = Math.max(2, Math.min(7, octaves));
   }
 
   setAtmosphereQuality(viewSamples: number, lightSamples: number, density: number): void {

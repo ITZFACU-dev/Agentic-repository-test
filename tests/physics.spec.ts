@@ -8,7 +8,7 @@
  */
 
 import { PhysicsEngine, DEFAULT_PARAMS } from '../src/physics/PhysicsEngine';
-import { G, AU, SOLAR_MASS, SOLAR_RADIUS, SOLAR_LUMINOSITY, EARTH_MASS, EARTH_RADIUS, YEAR, C, SIGMA_SB } from '../src/core/units';
+import { G, AU, SOLAR_MASS, SOLAR_RADIUS, SOLAR_LUMINOSITY, EARTH_MASS, EARTH_RADIUS, YEAR, C, SIGMA_SB, eddingtonLuminosity } from '../src/core/units';
 import { makeStar, makePlanet, makeBlackHole, composition, radiusFromMass, rocheLimit, orbitState } from '../src/physics/CelestialBody';
 import { orbitalElements, hohmannTransfer } from '../src/physics/OrbitalElements';
 import { buildSolarSystem, PRESETS } from '../src/sim/presets';
@@ -30,6 +30,7 @@ function report(name: string, value: number, expected: number, relTol: number) {
   return rel;
 }
 
+const fmtAU = (m: number) => `${(m / AU).toPrecision(4)} AU`;
 const fmt = (v: number) => (Math.abs(v) > 1e5 || (Math.abs(v) < 1e-3 && v !== 0) ? v.toExponential(6) : v.toFixed(6));
 
 // ── 1. Kepler's third law ────────────────────────────────────────────────────
@@ -640,7 +641,172 @@ console.log('\n── 20. Determinism ──────────────
   check('two identical runs produce bit-identical states', identical);
 }
 
-// ── 21. Performance smoke test ──────────────────────────────────────────────
+// ── 21. Accretion feedback ──────────────────────────────────────────────
+console.log('\n── 21. Accretion feedback (the disk lights up and pushes back) ────────');
+{
+  const mu = 10 * SOLAR_MASS;
+  const engine = new PhysicsEngine(64);
+  engine.params = {
+    ...DEFAULT_PARAMS,
+    adaptiveSubsteps: false,
+    // Tidal disruption off: this first case is the *contact* merge path.
+    rocheLimitEnabled: false,
+    tidalPhysics: false,
+    stellarEvolution: false,
+  };
+  const hole = makeBlackHole({ mass: mu, spin: 0.8, name: 'hole' });
+  const dinner = makePlanet({ name: 'dinner', mass: 1e24, radius: 5e6, pos: [2e9, 0, 0], vel: [0, Math.sqrt((G * mu) / 2e9), 0], surfaceTemp: 300 });
+  engine.load([hole, dinner]);
+  // Drop the planet onto the horizon: the merge is the accretion event.
+  const drop = engine.mass[1];
+  engine.vel[3] = 0;
+  engine.vel[4] = 0;
+  engine.vel[5] = 0;
+  for (let i = 0; i < 4000 && engine.count > 1; i++) engine.step(60);
+  check('the swallowed body merges into the black hole', engine.count === 1, `${engine.count} bodies left`);
+  check(
+    'the swallowed mass lands in the accretion reservoir',
+    Math.abs(engine.accretionFuel() - drop) / drop < 1e-9,
+    `${engine.accretionFuel().toExponential(3)} kg of ${drop.toExponential(3)} kg`,
+  );
+
+  engine.step(engine.accretionTimescale * 0.05);
+  const lit = engine.accretionLuminosity[0];
+  const edd = eddingtonLuminosity(engine.mass[0]);
+  check('the disk lights up: L > 0 and finite', lit > 0 && Number.isFinite(lit), `L = ${lit.toExponential(3)} W`);
+  check(
+    'accretion respects the Eddington limit',
+    lit <= edd * 1.0000001,
+    `L = ${lit.toExponential(3)} W vs L_Edd = ${edd.toExponential(3)} W (${((lit / edd) * 100).toFixed(1)} %)`,
+  );
+  check('the luminosity reaches the thermodynamics solver', engine.luminosity[0] === lit, `luminosity = ${engine.luminosity[0].toExponential(3)} W`);
+
+  const before = engine.accretionFuel();
+  for (let i = 0; i < 40; i++) engine.step(engine.accretionTimescale * 0.5);
+  const after = engine.accretionFuel();
+  const decayed = after < before * 1e-6;
+  check('the light curve decays as the reservoir drains', decayed, `${after.toExponential(2)} kg left of ${before.toExponential(2)} kg`);
+  const audit = engine.massAudit();
+  check(
+    'the mass audit balances: everything swallowed is either still in the hole or has been radiated',
+    Math.abs(audit.total + audit.radiated + audit.escaping - (mu + drop)) / (mu + drop) < 1e-12,
+    `M + M_rad + M_esc = ${((audit.total + audit.radiated + audit.escaping) / SOLAR_MASS).toFixed(9)} M☉ (given ${((mu + drop) / SOLAR_MASS).toFixed(9)} M☉)`,
+  );
+  check(
+    'the mass actually lost to radiation is small (η ≈ 10 %)',
+    engine.mass[0] < mu + drop && engine.accretionRadiatedMass > 0 && engine.accretionRadiatedMass <= drop * 0.11,
+    `M_rad = ${engine.accretionRadiatedMass.toExponential(3)} kg of ${drop.toExponential(3)} kg swallowed`,
+  );
+
+  // A second black hole whose gravity is *not* the point: a grain of dust in
+  // the radiation field of a quasar.
+  // Radiation pressure must push nearby matter *outward* — the disk doing
+  // mechanical work on the debris, which is the whole point of the feedback.
+  // A grain of dust in the radiation field of a quasar, at the Eddington
+  // luminosity. This is the mechanism that actually blows dust out of galaxies:
+  // a 1 mm grain has A/m ≈ 0.4 m²/kg, ten times a proton's σ_T/m_p, so at
+  // L_Edd it feels ten times the outward push that gravity pulls it in with.
+  const eddington = new PhysicsEngine(8);
+  eddington.params = {
+    ...DEFAULT_PARAMS,
+    adaptiveSubsteps: false,
+    collisionMode: 'none',
+    thermodynamics: false,
+    tidalPhysics: false,
+    rocheLimitEnabled: false,
+    stellarEvolution: false,
+    radiationPressure: 1,
+  };
+  const quasarMass = 1e8 * SOLAR_MASS;
+  const quasarL = eddingtonLuminosity(quasarMass);
+  const bright = makeBlackHole({ mass: quasarMass, name: 'quasar' });
+  const mote = makePlanet({ name: 'mote', mass: 2e-6, radius: 5e-4, pos: [1e13, 0, 0], vel: [0, 1, 0] });
+  eddington.load([bright, mote]);
+  eddington.baseLuminosity[0] = quasarL;
+  eddington.scaleLuminosity(1);
+  eddington.setRadiationPressure(1);
+
+  const grainMass = 2e-6;
+  const grainRadius = 5e-4;
+  const distance = 1e13;
+  const radiationOnly = (quasarL * Math.PI * grainRadius ** 2) / (4 * Math.PI * distance ** 2 * C * grainMass);
+  const gravityOnly = (G * quasarMass) / distance ** 2;
+  const aRadial = eddington.acc[3];
+  const aTangential = eddington.acc[5];
+
+  check(
+    'radiation pressure drives a dust grain outward, against gravity',
+    aRadial > 0 && Math.abs(aRadial) > Math.abs(aTangential) * 100,
+    `a_r = +${aRadial.toExponential(3)} m/s² outward (gravity alone: −${gravityOnly.toExponential(3)})`,
+  );
+  check(
+    'the net acceleration matches F_rad − F_grav exactly',
+    Math.abs(aRadial - (radiationOnly - gravityOnly)) / radiationOnly < 1e-9,
+    `engine ${aRadial.toExponential(4)} vs analytic ${(radiationOnly - gravityOnly).toExponential(4)} m/s²`,
+  );
+  check(
+    'at the Eddington limit a 1 mm grain feels ~10x the force per unit mass a proton does',
+    radiationOnly / gravityOnly > 5 && radiationOnly / gravityOnly < 20,
+    `F_rad/F_grav = ${(radiationOnly / gravityOnly).toFixed(2)} (A/m = ${(Math.PI * grainRadius ** 2 / grainMass).toFixed(2)} m²/kg vs σ_T/m_p = 0.0398)`,
+  );
+}
+
+// ── 22. Tidal disruption feeds the same reservoir ───────────────────────
+console.log('\n── 22. Tidal disruption event feeds the disk ─────────────────────────');
+{
+  const mu = 1e7 * SOLAR_MASS;
+  const engine = new PhysicsEngine(64);
+  // Adaptive sub-stepping ON: a periapsis passage at 0.6 c needs it, and this is
+  // exactly the situation it exists for.
+  engine.params = { ...DEFAULT_PARAMS, rocheLimitEnabled: false, stellarEvolution: false, softening: 1e8 };
+  const hole = makeBlackHole({ mass: mu, name: 'SMBH' });
+  // A solar-type star on a near-parabolic orbit aimed inside the tidal radius.
+  const star = makeStar({ name: 'victim', mass: SOLAR_MASS, radius: SOLAR_RADIUS, temp: 5772, luminosity: SOLAR_LUMINOSITY });
+  // Periapsis at *half* the tidal radius: a deep plunge, so the star is torn
+  // apart before it reaches the horizon.
+  const rp = 0.5 * SOLAR_RADIUS * Math.cbrt(mu / SOLAR_MASS);
+  const a = 100 * rp;
+  const vPeri = Math.sqrt((G * mu) / rp) * 0.55;
+  const rStart = 2 * a - rp;
+  star.pos = [rStart, 0, 0];
+  star.vel = [0, Math.sqrt((G * mu * (2 / rStart - 1 / a))), 0];
+  star.kind = 'star';
+  engine.load([hole, star]);
+  const massBefore = engine.mass[0] + engine.mass[1];
+  let disrupted = false;
+  for (let i = 0; i < 40000 && !disrupted; i++) {
+    engine.step(2000);
+    if (engine.count === 1) disrupted = true;
+  }
+  check(
+    'a star on a deep enough orbit is tidally disrupted',
+    disrupted,
+    disrupted ? `R_t = ${fmtAU(SOLAR_RADIUS * Math.cbrt(mu / SOLAR_MASS))}` : 'never reached the tidal radius',
+  );
+  if (disrupted) {
+    check(
+      'half the debris feeds the disk, half escapes as ring mass',
+      engine.accretionFuel() > 0 && engine.ringMass[0] > 0,
+      `feed ${engine.accretionFuel().toExponential(3)} kg, unbound ${engine.ringMass[0].toExponential(3)} kg`,
+    );
+    const audit = engine.massAudit();
+    check(
+      'the disruption conserves mass (hole + radiated + unbound stream)',
+      Math.abs(audit.total + audit.radiated + audit.escaping - massBefore) / massBefore < 1e-9,
+      `${(audit.total / SOLAR_MASS).toFixed(6)} M☉ bound + ${(audit.escaping / SOLAR_MASS).toFixed(6)} M☉ unbound = ${((audit.total + audit.escaping) / SOLAR_MASS).toFixed(6)} M☉ of ${(massBefore / SOLAR_MASS).toFixed(6)} M☉`,
+    );
+    engine.step(engine.accretionTimescale * 0.1);
+    const L = engine.accretionLuminosity[0];
+    const edd = eddingtonLuminosity(engine.mass[0]);
+    check(
+      'the flare is Eddington-limited and enormous',
+      L > 1e37 && L <= edd * 1.0000001,
+      `L = ${(L / SOLAR_LUMINOSITY).toExponential(3)} L☉, ${((L / edd) * 100).toFixed(0)} % of L_Edd`,
+    );
+  }
+}
+
+// ── 23. Performance smoke test ──────────────────────────────────────────────
 console.log('\n── 21. Performance ────────────────────────────────────────────────────');
 {
   const specs = buildSolarSystem({ kuiperBelt: true, comets: true });

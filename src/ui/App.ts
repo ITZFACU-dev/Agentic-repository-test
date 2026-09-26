@@ -17,11 +17,13 @@ import { SceneManager } from '../render/SceneManager';
 import { CameraRig } from '../render/CameraRig';
 import { HUD } from './HUD';
 import { Inspector } from './Inspector';
-import { LeftPanel, TimeBar, type OverlayName, type PipelineName, type UiActions } from './Panels';
+import { DrawerToggle, LeftPanel, TimeBar, type OverlayName, type PipelineName, type UiActions } from './Panels';
 import type { MainToWorker, Snapshot, WorkerToMain } from '../sim/protocol';
 import type { PhysicsParams } from '../physics/PhysicsEngine';
 import { WARP_LADDER } from './dom';
+import { Exporter, downloadText } from './Exporter';
 import { clamp } from '../core/mathx';
+import { QualityController, detectStartTier, type QualityChoice, type QualityProfile } from '../render/Quality';
 
 export class App {
   private pipeline: HDRPipeline;
@@ -47,6 +49,9 @@ export class App {
   private presetId = '';
   private lastSnapshotAt = 0;
   private graphTimer = 0;
+  private quality: QualityController;
+  readonly exporter = new Exporter();
+  private drawer: DrawerToggle;
 
   private actions: UiActions;
 
@@ -56,11 +61,29 @@ export class App {
     this.canvas.id = 'view';
     root.appendChild(this.canvas);
 
-    this.pipeline = new HDRPipeline(this.canvas);
+    // Decide the starting tier from the GPU we can see, then build the context:
+    // multisampling cannot be changed after construction, so the detection has
+    // to happen first.
+    const probeRenderer = { getContext: () => this.canvas.getContext('webgl2') as WebGL2RenderingContext };
+    const startTier = detectStartTier(probeRenderer);
+    this.pipeline = new HDRPipeline(this.canvas, startTier !== 'potato' && startTier !== 'low');
+    this.quality = new QualityController(startTier, {
+      onChange: (profile: QualityProfile) => this.applyQuality(profile),
+    });
     this.scene = new SceneManager(this.pipeline, root);
     this.rig = new CameraRig(this.canvas);
     this.hud = new HUD(root);
-    this.inspector = new Inspector(root);
+    this.inspector = new Inspector(root, {
+      csv: () => downloadText(`cosmoscope-${this.presetId || 'scene'}-timeseries.csv`, this.exporter.toCsv(this.presetId), 'text/csv'),
+      state: () => this.post({ type: 'exportState' }),
+      summary: () => {
+        const text = this.exporter.toSummary(this.presetId, this.warp);
+        void navigator.clipboard?.writeText(text).then(
+          () => this.hud.pushEvent('Run summary copied to the clipboard.'),
+          () => downloadText(`cosmoscope-${this.presetId}-summary.txt`, text),
+        );
+      },
+    });
 
     this.actions = {
       paused: false,
@@ -92,6 +115,14 @@ export class App {
     };
     this.left = new LeftPanel(root, this.actions);
     this.timebar = new TimeBar(root, this.actions);
+    // A phone starts with the render unobstructed; one tap brings the
+    // instruments back. Desktop starts with everything open.
+    const small = Math.min(window.innerWidth, window.innerHeight) < 820;
+    this.drawer = new DrawerToggle(root);
+    if (small) {
+      root.classList.add('drawer-closed');
+      this.drawer.setOpen(false);
+    }
 
     this.worker = new Worker(new URL('../workers/physics.worker.ts', import.meta.url), { type: 'module' });
     this.worker.onmessage = (ev: MessageEvent<WorkerToMain>) => this.onWorkerMessage(ev.data);
@@ -100,6 +131,7 @@ export class App {
       console.error(ev);
     };
 
+    this.applyQuality(this.quality.profile);
     this.buildHelp();
     this.bindInteraction();
     window.addEventListener('resize', () => this.resize());
@@ -122,6 +154,7 @@ export class App {
     this.actions.paused = false;
     this.timebar.syncPlayIcon();
     this.inspector.energy.reset();
+    this.exporter.reset();
     this.scene.reset();
     this.hud.clearEvents();
     this.left.markPreset(id);
@@ -182,8 +215,8 @@ export class App {
         this.atmosphereOptics.betaM = Number(value);
         this.applyAtmosphereOptics();
         break;
-      case 'atmosphereQuality':
-        this.scene.applyAtmosphereQuality(value as 'low' | 'medium' | 'high');
+      case 'quality':
+        this.quality.setChoice(value as QualityChoice);
         break;
     }
   }
@@ -192,13 +225,8 @@ export class App {
 
   private applyAtmosphereOptics(): void {
     const { density, betaR, betaM } = this.atmosphereOptics;
-    this.scene.applyAtmosphereQuality(this.scene.options.atmosphereQuality);
     this.scene.bodies.setAtmosphereOptics(betaR, betaM);
-    this.scene.bodies.setAtmosphereQuality(
-      this.scene.options.atmosphereQuality === 'low' ? 6 : this.scene.options.atmosphereQuality === 'medium' ? 10 : 14,
-      this.scene.options.atmosphereQuality === 'low' ? 3 : this.scene.options.atmosphereQuality === 'medium' ? 5 : 7,
-      density,
-    );
+    this.scene.setAtmosphereDensity(density);
   }
 
   private setPipeline(option: PipelineName, value: boolean | number): void {
@@ -291,6 +319,9 @@ export class App {
         this.degraded = message.degraded;
         this.hud.setDegraded(message.degraded);
         break;
+      case 'state':
+        downloadText(`cosmoscope-state-${this.presetId || 'scene'}-${Math.round(this.lastSnapshotAt)}.json`, message.json, 'application/json');
+        break;
       case 'error':
         this.hud.pushEvent(`physics error: ${message.message.split('\n')[0]}`, true);
         console.error(message.message);
@@ -310,6 +341,7 @@ export class App {
     tint: Float32Array;
     atmos: Float32Array;
     ids: Int32Array;
+    accretion: Float32Array;
     particles: Snapshot['particles'];
   }[] = [];
 
@@ -321,10 +353,8 @@ export class App {
     // newest state we have, immediately.
     this.scene.selectedId = this.selectedId;
     this.scene.applySnapshot(snapshot, Math.max(dt, 0), this.rig);
-    this.inspector.update(
-      snapshot.selected,
-      snapshot.selected ? this.scene.nameOf(this.primaryIdFor(snapshot)) : '',
-    );
+    this.inspector.update(snapshot.selected);
+    this.exporter.sample(snapshot);
     this.inspector.energy.push(snapshot.diagnostics.simTime, snapshot.diagnostics.kinetic, snapshot.diagnostics.potential, snapshot.diagnostics.total);
     this.drift = this.inspector.energy.drift;
     this.hud.update(snapshot.diagnostics, this.warp, this.drift);
@@ -346,6 +376,7 @@ export class App {
           tint: old.tint,
           atmos: old.atmos,
           ids: old.ids,
+          accretion: old.accretion,
           particles: old.particles,
         },
         [
@@ -357,6 +388,7 @@ export class App {
           old.tint.buffer as ArrayBuffer,
           old.atmos.buffer as ArrayBuffer,
           old.ids.buffer as ArrayBuffer,
+          old.accretion.buffer as ArrayBuffer,
         ],
       );
     }
@@ -372,13 +404,6 @@ export class App {
 
     const loading = document.getElementById('loading');
     if (loading && !loading.classList.contains('done')) loading.classList.add('done');
-  }
-
-  private primaryIdFor(snapshot: Snapshot): number {
-    if (!snapshot.selected) return -1;
-    // The worker does not ship the primary id, so show the most massive body
-    // that is not the selection itself.
-    return snapshot.selected.id;
   }
 
   selectedId = -1;
@@ -499,6 +524,14 @@ export class App {
     this.root.appendChild(help);
   }
 
+  /** Push a profile to the renderer and tell the user what changed. */
+  private applyQuality(profile: QualityProfile): void {
+    this.pipeline.applyQuality(profile);
+    this.scene.setQuality(profile);
+    this.resize();
+    this.hud.setQuality(profile, this.quality.choice === 'auto');
+  }
+
   private resize(): void {
     const width = window.innerWidth;
     const height = window.innerHeight;
@@ -515,6 +548,10 @@ export class App {
     this.lastFrame = now;
     this.hud.setFps(realDt);
     this.hud.tick(now);
+    // The governor sees the raw frame time — rendering plus everything else the
+    // page is doing — which is exactly the number the user feels.
+    this.quality.sample(realDt * 1000);
+    this.hud.setQuality(this.quality.profile, this.quality.choice === 'auto', this.quality.frameMs);
 
     // Physics: one advance in flight at a time, so the worker is never buried.
     if (!this.paused && !this.inFlight) {

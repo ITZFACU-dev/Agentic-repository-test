@@ -14,6 +14,7 @@
 
 import { PhysicsEngine, DEFAULT_PARAMS, type PhysicsParams } from '../physics/PhysicsEngine';
 import { orbitalElements } from '../physics/OrbitalElements';
+import { eddingtonLuminosity } from '../core/units';
 import { findPreset } from '../sim/presets';
 import {
   BodyFlags,
@@ -138,6 +139,7 @@ interface SnapshotBuffers {
   tint: Float32Array;
   atmos: Float32Array;
   ids: Int32Array;
+  accretion: Float32Array;
   particles: RingParticleChunk | null;
 }
 const pool: SnapshotBuffers[] = [];
@@ -158,6 +160,7 @@ function acquire(count: number, particleN: number): SnapshotBuffers {
     tint: new Float32Array(count * 3),
     atmos: new Float32Array(count * 3),
     ids: new Int32Array(count),
+    accretion: new Float32Array(count),
     particles:
       particleN > 0
         ? {
@@ -276,9 +279,14 @@ function buildTelemetry(): BodyTelemetry | null {
     };
   }
   const at = engine.atmospheres[i];
+  const accretion = engine.accretionLuminosity[i];
   return {
     id: engine.ids[i],
     name: engine.names[i],
+    primaryName: prim.index === i || prim.index < 0 ? '' : engine.names[prim.index],
+    accretion,
+    eddingtonFraction: engine.mass[i] > 0 ? accretion / eddingtonLuminosity(engine.mass[i]) : 0,
+    accretionFuel: engine.accretionReservoir[i],
     kind: engine.kinds[i],
     mass: engine.mass[i],
     radius: engine.radius[i],
@@ -336,7 +344,7 @@ function computeLagrange(): { id: string; pos: [number, number, number] }[] | nu
 function snapshot(): void {
   const n = engine.count;
   const b = acquire(n, field.count);
-  const { pos, vel, radii, temp, flags, tint, atmos, ids } = b;
+  const { pos, vel, radii, temp, flags, tint, atmos, ids, accretion } = b;
   for (let i = 0; i < n; i++) {
     pos[i * 3] = engine.pos[i * 3];
     pos[i * 3 + 1] = engine.pos[i * 3 + 1];
@@ -347,6 +355,7 @@ function snapshot(): void {
     radii[i] = engine.radius[i];
     temp[i] = engine.surfaceTemp[i];
     ids[i] = engine.ids[i];
+    accretion[i] = engine.accretionLuminosity[i];
     const c =
       engine.colors[i * 3] > 0
         ? [engine.colors[i * 3], engine.colors[i * 3 + 1], engine.colors[i * 3 + 2]]
@@ -398,6 +407,7 @@ function snapshot(): void {
     tint,
     atmos,
     ids,
+    accretion,
     particles,
     diagnostics: {
       simTime: engine.time,
@@ -426,6 +436,7 @@ function snapshot(): void {
     tint.buffer as ArrayBuffer,
     atmos.buffer as ArrayBuffer,
     ids.buffer as ArrayBuffer,
+    accretion.buffer as ArrayBuffer,
   ];
   if (particles) {
     transfer.push(
@@ -492,6 +503,69 @@ function describeEvent(e: (typeof engine.events)[number]): string | null {
     default:
       return null;
   }
+}
+
+/**
+ * A complete, self-describing dump of the current state — the raw material for
+ * a lab report. Everything is SI, everything the engine knows about a body is
+ * included, and it is JSON so it can be read by hand as well as by a script.
+ */
+function exportState(): string {
+  const bodies = [];
+  for (let i = 0; i < engine.count; i++) {
+    const prim = engine.primaryOfIndex(i);
+    bodies.push({
+      id: engine.ids[i],
+      name: engine.names[i],
+      kind: engine.kinds[i],
+      mass: engine.mass[i],
+      radius: engine.radius[i],
+      position: [engine.pos[i * 3], engine.pos[i * 3 + 1], engine.pos[i * 3 + 2]],
+      velocity: [engine.vel[i * 3], engine.vel[i * 3 + 1], engine.vel[i * 3 + 2]],
+      acceleration: [engine.acc[i * 3], engine.acc[i * 3 + 1], engine.acc[i * 3 + 2]],
+      surfaceTemp: engine.surfaceTemp[i],
+      equilibriumTemp: engine.equilibriumOf(i),
+      luminosity: engine.luminosity[i],
+      accretionLuminosity: engine.accretionLuminosity[i],
+      albedo: engine.albedo[i],
+      greenhouse: engine.greenhouse[i],
+      tidalHeating: engine.tidalHeat[i],
+      temperature: engine.surfaceTemp[i],
+      primary: prim.index >= 0 && prim.index !== i ? engine.names[prim.index] : null,
+      distanceToPrimary: prim.distance,
+      hillRadius: engine.hillRadiusOf(i),
+      rocheLimitFluid: engine.rocheOf(i, false),
+      specificOrbitalEnergy: (() => {
+        if (prim.index < 0 || prim.index === i) return 0;
+        const mu = engine.G * (engine.mass[prim.index] + engine.mass[i]);
+        const r = prim.distance;
+        const v = Math.hypot(
+          engine.vel[i * 3] - engine.vel[prim.index * 3],
+          engine.vel[i * 3 + 1] - engine.vel[prim.index * 3 + 1],
+          engine.vel[i * 3 + 2] - engine.vel[prim.index * 3 + 2],
+        );
+        return (v * v) / 2 - mu / r;
+      })(),
+      tracer: engine.isTracer[i] === 1,
+    });
+  }
+  return JSON.stringify(
+    {
+      application: 'Cosmoscope',
+      generated: new Date().toISOString(),
+      preset: currentPreset,
+      simulatedTime: engine.time,
+      integrator: engine.params.integrator,
+      parameters: engine.params,
+      diagnostics: engine.diagnostics,
+      bodyCount: engine.count,
+      destroyed: engine.destroyedCount,
+      accretionFuel: engine.accretionFuel(),
+      bodies,
+    },
+    null,
+    1,
+  );
 }
 
 function fmtKm(metres: number): string {
@@ -750,6 +824,9 @@ ctx.onmessage = (ev: MessageEvent<MainToWorker>) => {
         break;
       case 'whatIf':
         applyWhatIf(msg.key, msg.value);
+        break;
+      case 'exportState':
+        ctx.postMessage({ type: 'state', json: exportState() } satisfies WorkerToMain);
         break;
       case 'recycle':
         recycle(msg as unknown as SnapshotBuffers);

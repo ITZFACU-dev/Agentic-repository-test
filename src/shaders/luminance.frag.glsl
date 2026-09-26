@@ -4,6 +4,8 @@
 // nebula in the same frame: the exposure chases the average scene luminance
 // slowly (dark-adapt in ~2 s, bright-adapt in ~0.4 s, like a real retina).
 precision highp float;
+#include <shared>
+
 varying vec2 vUv;
 uniform sampler2D tDiffuse;
 uniform sampler2D tPrevious;

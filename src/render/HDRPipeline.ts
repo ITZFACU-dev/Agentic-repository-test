@@ -14,6 +14,7 @@
 
 import * as THREE from 'three';
 import sharedSource from '../shaders/shared.glsl?raw';
+import type { QualityProfile } from './Quality';
 import fullscreenVert from '../shaders/fullscreen.vert.glsl?raw';
 import lensingFrag from '../shaders/lensing.frag.glsl?raw';
 import brightFrag from '../shaders/bright.frag.glsl?raw';
@@ -107,15 +108,19 @@ export class HDRPipeline {
   private lensPass: FullscreenPass;
   private tonemapPass: FullscreenPass;
 
-  constructor(canvas: HTMLCanvasElement) {
+  /** Bloom mip levels actually used (the rest are skipped for speed). */
+  private bloomMipCount = BLOOM_MIPS;
+  private pixelRatioCap = 1.5;
+
+  constructor(canvas: HTMLCanvasElement, antialias = true) {
     this.renderer = new THREE.WebGLRenderer({
       canvas,
-      antialias: true,
+      antialias,
       alpha: false,
       powerPreference: 'high-performance',
       stencil: false,
     });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, this.pixelRatioCap));
     // Tone mapping and colour conversion happen in the tonemap pass, in linear
     // HDR space, so three must not touch either of them.
     this.renderer.toneMapping = THREE.NoToneMapping;
@@ -218,6 +223,25 @@ export class HDRPipeline {
     return this.sceneTarget;
   }
 
+  /**
+   * Apply a quality profile. Pixel ratio is the dominant cost — a HiDPI screen
+   * at ratio 2 costs four times the fill rate of ratio 1 — so it moves first,
+   * then the sample counts the shaders read.
+   */
+  applyQuality(profile: QualityProfile): void {
+    this.pixelRatioCap = profile.pixelRatio;
+    this.bloomMipCount = Math.max(1, Math.min(BLOOM_MIPS, profile.bloomMips));
+    this.toggles.chromatic = profile.chromatic;
+    const ratio = Math.min(window.devicePixelRatio || 1, profile.pixelRatio) * profile.renderScale;
+    this.renderer.setPixelRatio(ratio);
+    // Force a resize even if the CSS size has not changed.
+    const w = this.width;
+    const h = this.height;
+    this.width = 0;
+    this.height = 0;
+    this.setSize(w, h);
+  }
+
   setSize(width: number, height: number): void {
     if (width === this.width && height === this.height) return;
     this.width = width;
@@ -300,8 +324,9 @@ export class HDRPipeline {
     this.brightPass.material.uniforms.uExposure.value = t.exposureBias;
     this.draw(this.brightPass, this.bloomTargets[0]);
 
-    // 2. Blur and downsample the mip chain.
-    for (let i = 0; i < BLOOM_MIPS; i++) {
+    // 2. Blur and downsample the mip chain (only the levels the tier allows).
+    const mips = this.bloomMipCount;
+    for (let i = 0; i < mips; i++) {
       const src = this.bloomTargets[i];
       const scratch = this.blurScratch[i];
       const w = src.width;
@@ -313,7 +338,7 @@ export class HDRPipeline {
       this.blurPass.material.uniforms.tDiffuse.value = scratch.texture;
       this.blurPass.material.uniforms.uDirection.value.set(0, 1 / h);
       this.draw(this.blurPass, src);
-      if (i + 1 < BLOOM_MIPS) {
+      if (i + 1 < mips) {
         // Downsample by blitting with a linear filter.
         this.blurPass.material.uniforms.tDiffuse.value = src.texture;
         this.blurPass.material.uniforms.uDirection.value.set(1 / w, 0);

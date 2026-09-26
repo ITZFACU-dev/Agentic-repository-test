@@ -18,6 +18,7 @@ export class CurvatureGrid {
   readonly mesh: THREE.Mesh;
   readonly material: THREE.ShaderMaterial;
   private span = 1e13;
+  private segments = 200;
 
   constructor() {
     this.material = new THREE.ShaderMaterial({
@@ -47,20 +48,32 @@ export class CurvatureGrid {
     });
     this.mesh = this.build(200);
     this.mesh.frustumCulled = false;
+    this.segments = 200;
     this.mesh.visible = false;
     this.mesh.renderOrder = -100;
   }
 
+  /** Rebuild the plane at a lower/higher vertex count (quality tiers). */
+  setResolution(segments: number): void {
+    const clamped = Math.max(64, Math.min(256, Math.round(segments)));
+    if (clamped === this.segments) return;
+    this.segments = clamped;
+    const old = this.mesh.geometry;
+    this.mesh.geometry = new THREE.PlaneGeometry(1, 1, clamped, clamped).rotateX(-Math.PI / 2);
+    this.mesh.geometry.scale(this.span, 1, this.span);
+    old.dispose();
+  }
+
   private build(segments: number): THREE.Mesh {
-    const geo = new THREE.PlaneGeometry(1, 1, segments, segments);
-    geo.rotateX(-Math.PI / 2);
+    const geo = new THREE.PlaneGeometry(1, 1, segments, segments).rotateX(-Math.PI / 2);
+    geo.scale(this.span, 1, this.span);
     return new THREE.Mesh(geo, this.material);
   }
 
   /** Match the grid to the scale of the current scene (1 AU … 30 kpc). */
   setSpan(metres: number): void {
     this.span = metres;
-    this.mesh.scale.setScalar(metres);
+    this.mesh.scale.setScalar(1);
     this.material.uniforms.uSpan.value = metres;
   }
 

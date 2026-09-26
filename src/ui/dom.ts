@@ -137,9 +137,10 @@ export function button(parent: HTMLElement, label: string, onClick: () => void, 
 export const fmt = {
   metres(v: number): string {
     const a = Math.abs(v);
-    if (a >= 1.495978707e11) return `${(v / 1.495978707e11).toPrecision(4)} AU`;
-    if (a >= 1e7) return `${(v / 1e3).toPrecision(4)} Mm`;
-    if (a >= 1e3) return `${(v / 1e3).toPrecision(4)} km`;
+    // 0.01 AU is about where "kilometres" stops being the natural unit.
+    if (a >= 1.495978707e9) return `${(v / 1.495978707e11).toPrecision(4)} AU`;
+    if (a >= 1e9) return `${(v / 1e9).toPrecision(4)} Gm`;
+    if (a >= 1e4) return `${(v / 1e3).toPrecision(4)} km`;
     return `${v.toPrecision(4)} m`;
   },
   mass(v: number): string {
@@ -169,6 +170,15 @@ export const fmt = {
     const a = Math.abs(v);
     if (a >= 1e40) return `${(v / 1e40).toPrecision(3)}×10⁴⁰ J`;
     return `${v.toExponential(3)} J`;
+  },
+  /** Power: watts up to a solar luminosity, then L☉ (quasars need it). */
+  power(v: number): string {
+    const a = Math.abs(v);
+    if (!(a > 0)) return '—';
+    if (a >= 1e26) return `${(v / 3.828e26).toPrecision(4)} L☉`;
+    if (a >= 1e9) return `${(v / 1e9).toPrecision(4)} GW`;
+    if (a >= 1e3) return `${(v / 1e3).toPrecision(4)} kW`;
+    return `${v.toPrecision(4)} W`;
   },
   temp(v: number): string {
     return `${v.toPrecision(4)} K`;

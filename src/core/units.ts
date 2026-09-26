@@ -38,6 +38,18 @@ export const SCHWARZSCHILD_RADIUS_PER_KG = (2 * G) / C2; // R_s = 2GM/c^2
 /** Schwarzschild radius of a mass (m). */
 export const schwarzschildRadius = (m: number) => (SCHWARZSCHILD_RADIUS_PER_KG * m);
 
+/**
+ * Eddington luminosity per solar mass, W/M☉:
+ *
+ *     L_Edd = 4π G M m_p c / σ_T ≈ 1.2575 × 10³¹ (M / M☉) W
+ *
+ * where the radiation force on the electrons balances gravity on the protons.
+ * It is a hard ceiling on steady spherical accretion, which is why quasars do
+ * not outshine entire galaxies by a factor of a million.
+ */
+export const EDDINGTON_PER_SOLAR_MASS = 1.2575e31;
+export const eddingtonLuminosity = (massKg: number) => EDDINGTON_PER_SOLAR_MASS * (massKg / SOLAR_MASS);
+
 /** Photon sphere radius: r = 1.5 R_s. */
 export const photonSphere = (m: number) => 1.5 * schwarzschildRadius(m);
 

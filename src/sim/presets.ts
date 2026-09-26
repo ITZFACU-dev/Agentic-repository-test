@@ -415,7 +415,7 @@ export function buildSolarSystem(opts: { kuiperBelt?: boolean; comets?: boolean 
     // Kuiper belt: massless tracers on circular orbits between 34 and 50 AU.
     const rng = makeRng(20240501);
     const mu = 6.6743e-11 * SOLAR_MASS;
-    for (let i = 0; i < 240; i++) {
+    for (let i = 0; i < 90; i++) {
       const a = 34 + Math.pow(rng(), 0.7) * 16;
       const inc = (rng() - 0.5) * 0.35;
       const node = rng() * Math.PI * 2;

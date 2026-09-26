@@ -18,6 +18,7 @@ import { CameraRig } from './CameraRig';
 import { BodyFlags, type RosterEntry, type Snapshot } from '../sim/protocol';
 import { AU, PARSEC, blackbodyColor } from '../core/units';
 import { clamp } from '../core/mathx';
+import type { QualityProfile } from './Quality';
 
 export type { RosterEntry } from '../sim/protocol';
 
@@ -28,7 +29,6 @@ export interface SceneOptions {
   showHabitability: boolean;
   showVectors: boolean;
   exaggeration: number;
-  atmosphereQuality: 'low' | 'medium' | 'high';
   /** Accretion disks around compact objects (off unless a lab asks for one). */
   showAccretion: boolean;
 }
@@ -59,7 +59,6 @@ export class SceneManager {
     showHabitability: false,
     showVectors: true,
     exaggeration: 1,
-    atmosphereQuality: 'high',
     showAccretion: false,
   };
 
@@ -72,7 +71,6 @@ export class SceneManager {
     this.labels = new Labels(labelsHost);
     this.scene.add(this.starfield.mesh, this.bodies.group, this.overlays.group, this.grid.mesh);
     void pipeline;
-    this.applyAtmosphereQuality('high');
   }
 
   setRoster(entries: RosterEntry[]): void {
@@ -93,11 +91,29 @@ export class SceneManager {
     return this.roster.get(id)?.kind ?? 'unknown';
   }
 
-  applyAtmosphereQuality(quality: SceneOptions['atmosphereQuality']): void {
-    this.options.atmosphereQuality = quality;
-    if (quality === 'low') this.bodies.setAtmosphereQuality(6, 3, 1);
-    else if (quality === 'medium') this.bodies.setAtmosphereQuality(10, 5, 1);
-    else this.bodies.setAtmosphereQuality(14, 7, 1);
+  /**
+   * Fan a quality profile out to every renderer that has a knob. Called by the
+   * App whenever the tier changes, whether by hand or by the auto-tuner.
+   */
+  setQuality(profile: QualityProfile): void {
+    this.quality = profile;
+    this.bodies.setDetail(profile.surfaceOctaves);
+    this.bodies.setAtmosphereQuality(profile.atmosView, profile.atmosLight, this.atmosphereOptics.density);
+    this.starfield.setDetail(profile.starDetail);
+    this.starfield.setMilkyWay(profile.deepSky);
+    this.starfield.setNebula(profile.deepSky * 0.6);
+    this.grid.setResolution(profile.gridSegments);
+  }
+
+  quality: QualityProfile | null = null;
+
+  private atmosphereOptics = { density: 1 };
+
+  /** Optical-depth multiplier shared by every atmosphere. */
+  setAtmosphereDensity(density: number): void {
+    this.atmosphereOptics.density = density;
+    const profile = this.quality;
+    if (profile) this.bodies.setAtmosphereQuality(profile.atmosView, profile.atmosLight, density);
   }
 
   // ── Snapshot ingestion ────────────────────────────────────────────────────
@@ -155,14 +171,21 @@ export class SceneManager {
       // shadow should be 23 km across, not the 13 000 km of the star itself.
       const rs = 1.4852e-27 * mass;
       const hasDisk = kind === 'blackhole' && this.options.showAccretion;
+      // The disk's brightness follows the accretion luminosity and its peak
+      // temperature follows T ∝ Ṁ^{1/4} (Shakura–Sunyaev), so a disruption
+      // flare is visibly hotter and whiter than a quiet disk.
+      const accretion = snapshot.accretion[i];
+      const eddingtonFraction = accretion / Math.max(1.2575e31 * (mass / 1.98847e30), 1);
+      const diskStrength = hasDisk ? clamp(0.25 + Math.log10(1 + accretion / 1e34) * 0.35, 0.15, 2.4) : 0;
+      const diskTemp = 9000 * Math.pow(clamp(eddingtonFraction, 0.01, 1), 0.25);
       this.lensCache.push({
         position: new THREE.Vector3(snapshot.pos[i * 3], snapshot.pos[i * 3 + 1], snapshot.pos[i * 3 + 2]),
         rs,
         strength: 1,
         axis: new THREE.Vector3(0, 1, 0),
-        diskStrength: hasDisk ? 1 : 0,
+        diskStrength,
         diskOuter: rs * 14,
-        diskTemp: 16000,
+        diskTemp,
         diskColor: new THREE.Color(1.0, 0.82, 0.62),
       });
     }
@@ -262,6 +285,10 @@ export class SceneManager {
     // The sky sphere is centred on the camera by construction: the vertex
     // shader uses the rotation-only view matrix, so it behaves like a skybox
     // at infinity and never clips.
+    // Projected-pixel scale: screen height / (2 tan(fov/2)). The surface shader
+    // uses it (with each body's radius and distance) to pick its octave count.
+    const fov = (rig.camera as THREE.PerspectiveCamera).fov * (Math.PI / 180);
+    this.bodies.setPixelScale(height / (2 * Math.tan(fov / 2)));
     this.bodies.setCameraUniforms(vp, camPos, this.time);
     this.grid.setCameraUniforms(vp, camPos, this.time);
     this.grid.setVisible(this.options.showGrid);

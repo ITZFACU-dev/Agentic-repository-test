@@ -37,6 +37,8 @@ export interface UiActions {
   paused: boolean;
 }
 
+export type QualityChoiceUi = 'auto' | 'potato' | 'low' | 'medium' | 'high' | 'ultra';
+
 export type OverlayName =
   | 'labels'
   | 'trails'
@@ -46,12 +48,38 @@ export type OverlayName =
   | 'lagrange'
   | 'accretion'
   | 'exaggeration'
-  | 'atmosphereQuality'
+  | 'quality'
   | 'atmosphereDensity'
   | 'atmosphereBetaR'
   | 'atmosphereBetaM';
 
 export type PipelineName = 'bloom' | 'eyeAdaptation' | 'lensing' | 'bloomStrength' | 'exposureBias' | 'chromatic';
+
+/**
+ * Compact chrome for touch screens: one button that hides or reveals the side
+ * panels and the time bar, so the render is what you see on a phone and the
+ * instruments are one tap away.
+ */
+export class DrawerToggle {
+  readonly root: HTMLButtonElement;
+  private open = true;
+  constructor(parent: HTMLElement, onChange?: (open: boolean) => void) {
+    this.root = el('button', 'drawer-toggle', '☰');
+    this.root.title = 'Show or hide the panels';
+    this.root.addEventListener('click', () => {
+      this.open = !this.open;
+      parent.classList.toggle('drawer-closed', !this.open);
+      this.root.textContent = this.open ? '☰' : '⌃';
+      onChange?.(this.open);
+    });
+    parent.appendChild(this.root);
+  }
+
+  setOpen(open: boolean): void {
+    this.open = open;
+    this.root.textContent = open ? '☰' : '⌃';
+  }
+}
 
 export class LeftPanel {
   readonly root: HTMLDivElement;
@@ -289,12 +317,24 @@ export class LeftPanel {
       onInput: (v) => this.actions.pipeline('chromatic', v),
     });
 
-    const quality = section(body, 'Atmosphere');
-    segmented(quality, 'scattering samples', [
-      { id: 'low' as const, label: '6×3' },
-      { id: 'medium' as const, label: '10×5' },
-      { id: 'high' as const, label: '14×7' },
-    ], 'high', (v) => this.actions.overlay('atmosphereQuality', v));
+    const perf = section(body, 'Performance');
+    segmented(perf, 'quality', [
+      { id: 'auto' as const, label: 'Auto' },
+      { id: 'potato' as const, label: 'Potato' },
+      { id: 'low' as const, label: 'Low' },
+      { id: 'medium' as const, label: 'Med' },
+      { id: 'high' as const, label: 'High' },
+      { id: 'ultra' as const, label: 'Ultra' },
+    ], 'auto', (v) => this.actions.overlay('quality', v));
+    const perfNote = el(
+      'div',
+      'preset',
+      'Auto watches the real frame time and moves between tiers on its own — it only ever touches how many samples the pixels get, never the physics. Potato caps the resolution at 0.75×, drops to 2 noise octaves and 4×2 atmosphere samples; Ultra runs 7 octaves, 14×7 samples and full-resolution stars.',
+    );
+    perfNote.style.cursor = 'default';
+    perf.appendChild(perfNote);
+
+    const quality = section(body, 'Atmosphere appearance');
     slider(quality, {
       label: 'optical depth (thickness)',
       min: 0,

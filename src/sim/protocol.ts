@@ -55,6 +55,12 @@ export interface BodyTelemetry {
   greenhouse: number;
   albedo: number;
   tidalHeating: number;
+  /** Accretion luminosity, W, and the fraction of the Eddington limit. */
+  accretion: number;
+  eddingtonFraction: number;
+  /** Mass still waiting to be radiated, kg. */
+  accretionFuel: number;
+  primaryName: string;
   axialTilt: number;
   spinPeriod: number;
   composition: string;
@@ -107,6 +113,8 @@ export interface Snapshot {
   tint: Float32Array;
   atmos: Float32Array;
   ids: Int32Array;
+  /** Accretion luminosity per body, W (0 for everything that is not feeding). */
+  accretion: Float32Array;
   particles: RingParticleChunk | null;
   diagnostics: Diagnostics;
   selected: BodyTelemetry | null;
@@ -126,7 +134,8 @@ export type MainToWorker =
   | { type: 'lagrange'; primary: number; secondary: number }
   | { type: 'whatIf'; key: 'G' | 'c' | 'radiationPressure' | 'solarLuminosity'; value: number }
   | { type: 'scenario'; name: ScenarioName }
-  | { type: 'recycle'; pos: Float32Array; vel: Float32Array; radii: Float32Array; temp: Float32Array; flags: Uint8Array; tint: Float32Array; atmos: Float32Array; ids: Int32Array; particles: RingParticleChunk | null };
+  | { type: 'recycle'; pos: Float32Array; vel: Float32Array; radii: Float32Array; temp: Float32Array; flags: Uint8Array; tint: Float32Array; atmos: Float32Array; ids: Int32Array; accretion: Float32Array; particles: RingParticleChunk | null }
+  | { type: 'exportState' };
 
 export type ScenarioName =
   | 'sun-to-blackhole'
@@ -162,5 +171,6 @@ export type WorkerToMain =
   | { type: 'roster'; entries: RosterEntry[] }
   | { type: 'event'; kind: string; text: string; detail?: string }
   | { type: 'diagnostics'; degraded: boolean }
+  | { type: 'state'; json: string }
   | { type: 'error'; message: string }
   | Snapshot;
